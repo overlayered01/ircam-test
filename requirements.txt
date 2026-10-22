@@ -1,0 +1,5 @@
+# Python 3.12 권장 (pyorbbecsdk2 는 3.13 이하 휠만 제공)
+pyorbbecsdk2>=2.1
+opencv-python>=4.8
+numpy>=2.1
+pytest
