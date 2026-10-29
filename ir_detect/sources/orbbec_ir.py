@@ -87,7 +87,15 @@ class OrbbecIRSource(CameraSource):
             raise SourceUnavailable(str(e)) from e
         except fd.OBError as e:
             where = f"{self.ip}:{self.port or fd.DEFAULT_NET_PORT}" if self.ip else self.serial
-            raise SourceUnavailable(f"장치 {where} 를 찾을 수 없습니다 ({e})") from e
+            msg = f"장치 {where} 를 찾을 수 없습니다 ({e})"
+            if "Connect to server failed" in str(e):
+                # 네트워크 장치는 UDP 브로드캐스트로 탐색되지만 TCP 연결은 같은 서브넷이어야 한다.
+                msg += (
+                    "\n  네트워크 장치가 탐색은 되지만 TCP 연결이 안 됩니다. PC 에 장치와 같은 서브넷의 IP 가 있는지 확인하세요"
+                    "\n  (Femto Mega 공장 기본 192.168.1.10 → 카메라가 꽂힌 어댑터에 192.168.1.x/24 추가, 관리자 PowerShell:"
+                    '\n   New-NetIPAddress -InterfaceAlias "<어댑터>" -IPAddress 192.168.1.100 -PrefixLength 24)'
+                )
+            raise SourceUnavailable(msg) from e
         try:
             self._pipe = fd.Pipeline(self._dev)
         except (fd.OBError, UnicodeDecodeError, RuntimeError) as e:
