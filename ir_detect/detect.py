@@ -92,8 +92,9 @@ class AprilTagDetector:
             try:
                 from pupil_apriltags import Detector
 
+                # pupil-apriltags 는 tag36h10 을 모른다 → OpenCV 로
                 self._pupil = Detector(families=family, nthreads=2, quad_decimate=1.0, refine_edges=True)
-            except ImportError:
+            except Exception:  # noqa: BLE001  ImportError 또는 미지원 계열
                 if backend == "pupil":
                     raise
         p = cv2.aruco.DetectorParameters()
