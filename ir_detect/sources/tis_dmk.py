@@ -178,7 +178,8 @@ class TisDmkSource(CameraSource):
             raw = flat.view(np.uint16).reshape(h.value, w.value).copy()
         else:
             raw = flat.reshape(h.value, w.value).copy()
-        raw = raw[::-1]  # DirectShow 는 아래→위 순서로 준다
+        # tisgrabber 의 IC_GetImagePtr 버퍼는 이미 위→아래 순서다 (DirectShow 의 bottom-up 이 아님).
+        # 실측: 뒤집으면 거울상이 되어 AprilTag 디코딩이 전부 실패한다 (사각형은 찾지만 hamming 2).
         return Frame(raw, to_u8(raw), self.mode, self._intr, 0.0, {"fps_set": self._mode_fps})
 
     # --- 노출 / 게인 (스트리밍 중에도 바뀐다) ---
