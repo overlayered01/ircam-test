@@ -63,7 +63,7 @@ DMK 는 IR 패널 하나만 쓰고(depth/color 없음) 메뉴에 모드·노출�
 
 | 키 | 동작 |
 |---|---|
-| `e` | 설정 메뉴. Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. 공통: Detect / Tag family / Invert image. `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기 |
+| `e` 또는 하단 `MENU` 버튼 | 설정 메뉴. Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. 공통: Detect / Tag family / Invert image / 도형 조건. 키보드 `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기. 마우스: 행 클릭 선택, `<` `>` 클릭·휠로 값, `Apply` / `Close` 버튼 |
 | `+/-`, `[ ]` | 경계선 투영 거리 ±100mm / ±1000mm |
 | `s` | 스냅샷 (PNG + 켜진 스트림의 depth npy / color PNG + JSON) 저장 |
 | `q` / `ESC` | 종료 |
@@ -160,10 +160,14 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | Detect | off / apriltag / shapes / both | 재시작 없이 즉시 적용 |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
+| Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
+| Regular only | on / off | 정형만: 정삼각형 · 정사각형 · 정십자 · 원 · 정오각형 · 정육각형. rect 는 제외 |
+| Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차. 변 길이·대각선·팔 길이·종횡비가 이상값에서 벗어난 최대 비율 |
+| Shape min px | 10 / 20 / 40 / 80 / 160 | 외접 사각형 짧은 변 최소 (원본 픽셀) |
 
 - 태그: `pupil-apriltags` 가 있으면 그것(hamming / decision_margin 표시), 없으면 OpenCV ArUco. 두 검출기 모두 **검은 테두리** 를 찾는다.
-- 도형: Otsu 이진화 → 외곽선 → 다각형 근사. triangle / square / rect / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
-  어두운 장면에서는 큰 어두운 영역이 rect 로 잡히니 노출을 올리고 보자.
+- 도형: Otsu 이진화 → 외곽선 → 다각형 근사. triangle / square / rect / cross(십자) / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
+  도형마다 정형 편차(dev %)를 같이 표시한다 (주황 = 허용 안, 노랑 = 허용 밖). 어두운 장면에서는 큰 어두운 영역이 rect 로 잡히니 노출을 올리고 보자.
 - 검출은 폭 1280px 로 줄인 영상에서 하고 좌표는 원본으로 돌린다 (DMK 2448x2048 도 약 50ms).
 - `s` 스냅샷의 JSON 에 태그 id·중심·한 변 픽셀·코너, 도형 이름·중심·면적이 들어간다.
 - 저장된 영상으로 다시 돌리려면:

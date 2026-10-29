@@ -113,6 +113,10 @@ class ViewFlags:
     detect: str = "off"  # off / apriltag / shapes / both
     family: str = "tag36h11"
     invert: bool = False  # 검출 전 영상 반전 (흰 테두리 태그, 어두운 바탕의 밝은 도형)
+    shape_type: str = "all"  # det.SHAPE_TYPES
+    shape_regular: bool = True  # 정형(정삼각형·정사각형·정십자·원)만
+    shape_tol: float = 0.1  # 정형 허용 편차
+    shape_min: int = 20  # 최소 크기 (원본 픽셀)
 
     @property
     def tags(self) -> bool:
@@ -121,6 +125,10 @@ class ViewFlags:
     @property
     def shapes(self) -> bool:
         return self.detect in ("shapes", "both")
+
+    @property
+    def shape_options(self) -> det.ShapeOptions:
+        return det.ShapeOptions(self.shape_type, self.shape_regular, self.shape_tol, self.shape_min)
 
 
 DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
@@ -194,15 +202,31 @@ def _nearest(options: list[float], v: float | None) -> int:
 def detect_rows(flags: ViewFlags) -> list[MenuRow]:
     """모든 장치에 공통인 인식 항목."""
     fams = list(det.FAMILIES)
+    types = list(det.SHAPE_TYPES)
+    tols = [f"{int(t * 100)}%" for t in det.SHAPE_TOLS]
+    mins = [str(v) for v in det.SHAPE_MIN_PX]
     return [
         MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect)),
         MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert)),
+        MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0),
+        MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular)),
+        MenuRow("stol", "Shape tolerance", tols, _nearest(list(det.SHAPE_TOLS), flags.shape_tol)),
+        MenuRow("smin", "Shape min px", mins, _nearest(list(det.SHAPE_MIN_PX), flags.shape_min)),
     ]
 
 
 def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
-    return replace(flags, detect=m.row("detect").value, family=m.row("family").value, invert=bool(m.get("invert")))
+    return replace(
+        flags,
+        detect=m.row("detect").value,
+        family=m.row("family").value,
+        invert=bool(m.get("invert")),
+        shape_type=m.row("stype").value,
+        shape_regular=bool(m.get("sreg")),
+        shape_tol=det.SHAPE_TOLS[m.get("stol")],
+        shape_min=det.SHAPE_MIN_PX[m.get("smin")],
+    )
 
 
 def build_orbbec_menu(labels: list[str], op: "Opened", target: Target, flags: ViewFlags) -> MenuState:
@@ -278,24 +302,67 @@ def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuSta
     return MenuState(rows, on_adjust)
 
 
-def draw_menu(canvas: np.ndarray, menu: MenuState) -> None:
+@dataclass
+class MenuLayout:
+    """draw_menu 가 그린 위치. 마우스 클릭을 항목/화살표/버튼에 대응시킨다."""
+
+    rows: list[tuple[int, int, int, int]]  # 행마다 (x0, y0, x1, y1)
+    left: tuple[int, int]  # '<' 영역 x 범위
+    right: tuple[int, int]  # '>' 영역 x 범위
+    apply: tuple[int, int, int, int]
+    close: tuple[int, int, int, int]
+
+    @staticmethod
+    def inside(r: tuple[int, int, int, int], x: int, y: int) -> bool:
+        return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+
+    def row_at(self, x: int, y: int) -> int:
+        return next((i for i, r in enumerate(self.rows) if self.inside(r, x, y)), -1)
+
+
+ROW_H = 32
+
+
+def draw_menu(canvas: np.ndarray, menu: MenuState) -> MenuLayout:
     rows = menu.rows()
-    label_w = 160
-    value_w = max(260, max(len(v) for _, v in rows) * 11 + 40)
-    w, h = label_w + value_w + 40, 36 * (len(rows) + 2) + 20
+    label_w = 170
+    value_w = max(300, max(len(v) for _, v in rows) * 11 + 80)
+    w, h = label_w + value_w + 40, ROW_H * (len(rows) + 2) + 24
     x0, y0 = 30, 30
     box = canvas[y0 : y0 + h, x0 : x0 + w]
     box[:] = (box * 0.25).astype(np.uint8)
     cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), viz.YELLOW, 1)
+    vx = x0 + label_w  # 값 영역 시작
+    rects = []
     for i, (label, value) in enumerate(rows):
-        y = y0 + 36 * (i + 1)
+        y = y0 + ROW_H * (i + 1)
+        r = (x0 + 6, y - 22, x0 + w - 6, y + 8)
+        rects.append(r)
         color = viz.YELLOW if i == menu.sel else viz.WHITE
         if i == menu.sel:
-            cv2.rectangle(canvas, (x0 + 6, y - 24), (x0 + w - 6, y + 10), (60, 60, 60), -1)
+            cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), (60, 60, 60), -1)
         viz.put_text(canvas, label, (x0 + 16, y), 0.6, color)
-        viz.put_text(canvas, f"<  {value}  >" if i == menu.sel else value, (x0 + label_w, y), 0.6, color)
-    viz.put_text(canvas, "up/down select   left/right change   Enter apply   Esc close",
-                 (x0 + 16, y0 + h - 12), 0.5, viz.YELLOW)
+        viz.put_text(canvas, "<", (vx, y), 0.6, color)
+        viz.put_text(canvas, value, (vx + 28, y), 0.6, color)
+        viz.put_text(canvas, ">", (x0 + w - 34, y), 0.6, color)
+    by = y0 + h - 14
+    apply = (x0 + w - 230, by - 22, x0 + w - 130, by + 6)
+    close = (x0 + w - 110, by - 22, x0 + w - 20, by + 6)
+    for r, text in ((apply, "Apply"), (close, "Close")):
+        cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), viz.YELLOW, 1)
+        viz.put_text(canvas, text, (r[0] + 14, r[3] - 8), 0.55, viz.YELLOW)
+    viz.put_text(canvas, "arrows/wheel/click: change   Enter: apply   Esc: close", (x0 + 16, by), 0.45, viz.YELLOW)
+    return MenuLayout(rects, (vx - 10, vx + 24), (x0 + w - 44, x0 + w - 6), apply, close)
+
+
+def draw_menu_button(canvas: np.ndarray) -> tuple[int, int, int, int]:
+    """하단 오른쪽 'MENU' 버튼. 클릭하면 메뉴가 열린다."""
+    h, w = canvas.shape[:2]
+    r = (w - 110, h - 34, w - 14, h - 6)
+    cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), (40, 40, 40), -1)
+    cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), viz.YELLOW, 1)
+    viz.put_text(canvas, "MENU (e)", (r[0] + 10, r[3] - 9), 0.5, viz.YELLOW)
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +714,7 @@ class OrbbecView:
             viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
             ir_lines.append("magenta: color FOV")
         if flags.detect != "off":
-            self.det = self.detp.run(to_u8(last["ir"]), flags.tags, flags.shapes, flags.family, flags.invert)
+            self.det = self.detp.run(to_u8(last["ir"]), flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
             det.draw(ir, self.det, si)
             ir_lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
 
@@ -781,7 +848,7 @@ class TisView:
         else:
             lines.append("no calibration: FOV overlay unavailable (calib/dmk_<serial>.json)")
         if flags.detect != "off":
-            self.det = self.detp.run(f.image, flags.tags, flags.shapes, flags.family, flags.invert)
+            self.det = self.detp.run(f.image, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
             det.draw(ir, self.det, s)
             lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
         na = ["n/a for this device"]
@@ -824,6 +891,8 @@ def main() -> None:
     cell_w, cell_h = map(int, args.cell.lower().split("x"))
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, cell_w * 2, cell_h * 2)
+    mouse_events: list[tuple[int, int, int, int]] = []  # (event, x, y, flags) — 메인 루프에서 처리
+    cv2.setMouseCallback(WIN, lambda e, x, y, f, _p=None: mouse_events.append((e, x, y, f)))
     show_message(cell_w * 2, cell_h * 2, ["Connecting...", "(device open ~3s + stream start ~2s)"])
 
     quiet_sdk_log()
@@ -959,13 +1028,44 @@ def main() -> None:
                          (10, canvas.shape[0] - 10), 0.5, viz.YELLOW)
             if time.time() < toast_until:
                 viz.put_text(canvas, toast, (10, canvas.shape[0] - 40), 0.7, viz.YELLOW)
-            if menu is not None:
-                draw_menu(canvas, menu)
+            menu_btn = draw_menu_button(canvas)
+            menu_layout = draw_menu(canvas, menu) if menu is not None else None
             cv2.imshow(WIN, canvas)
 
             k = cv2.waitKeyEx(1)
             if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
                 break
+
+            # --- 마우스: 하단 MENU 버튼, 메뉴 행 클릭(선택), < > 클릭·휠(값), Apply / Close ---
+            while mouse_events:
+                e, mx, my, mf = mouse_events.pop(0)
+                if menu is None:
+                    if e == cv2.EVENT_LBUTTONDOWN and MenuLayout.inside(menu_btn, mx, my):
+                        menu = (build_orbbec_menu(labels, op, op.st.target, flags) if op.kind == "orbbec"
+                                else build_tis_menu(labels, op, flags))
+                    continue
+                if menu_layout is None:
+                    continue
+                row = menu_layout.row_at(mx, my)
+                if e == cv2.EVENT_LBUTTONDOWN:
+                    if MenuLayout.inside(menu_layout.apply, mx, my):
+                        apply_menu(menu)
+                        menu = None
+                    elif MenuLayout.inside(menu_layout.close, mx, my):
+                        menu = None
+                    elif row >= 0:
+                        menu.sel = row
+                        if menu_layout.left[0] <= mx <= menu_layout.left[1]:
+                            menu.adjust(-1)
+                        elif mx >= menu_layout.right[0]:
+                            menu.adjust(1)
+                        elif mx > menu_layout.left[1]:
+                            menu.adjust(1)  # 값 글자 클릭 = 다음 값
+                elif e == cv2.EVENT_MOUSEWHEEL and row >= 0:
+                    menu.sel = row
+                    delta = (mf >> 16) & 0xFFFF  # 휠 방향은 flags 상위 16비트 (signed)
+                    menu.adjust(1 if delta < 0x8000 else -1)
+
             if k == -1:
                 continue
             ch = k & 0xFF if k < 0x10000 else -1
