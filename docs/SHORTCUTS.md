@@ -43,6 +43,9 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | Angle grid | on / off | 10° 간격, 렌즈 왜곡 반영. 즉시 적용 |
 | D2C align | on / off | color + depth 가 켜져 있을 때만 의미 있음. 4K 에서 느리면 끈다. 즉시 적용 |
 | Auto distance | on / off | 화면 중앙 depth 의 중앙값을 거리로 사용 (depth 켜졌을 때). 즉시 적용 |
+| Detect | off / apriltag / shapes / both | IR 패널에 검출 결과 오버레이 + 요약. 즉시 적용, 장치를 바꿔도 유지 |
+| Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | |
+| Invert image | on / off | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형 |
 
 DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 
@@ -55,6 +58,7 @@ DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 | Gain auto | on / off | |
 | Gain (dB) | 0 … 48 | 즉시 적용 |
 | Angle grid | on / off | `calib/dmk_<serial>.json` 이 있을 때만 나온다 |
+| Detect / Tag family / Invert image | 위와 같음 | |
 
 - 지원하지 않는 조합이면 "failed: ..." 가 표시되고 이전 구성이 유지된다.
 - 장치 전환에 실패하면 이전 장치를 다시 연다.
@@ -84,4 +88,4 @@ DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 
 ## 키가 없는 스크립트
 
-`fov_table.py`, `list_modes.py`, `check_tags.py` 는 창 없이 터미널에 결과만 출력한다. 중단은 `Ctrl+C`.
+`fov_table.py`, `list_modes.py`, `check_tags.py`, `detect_image.py`, `gige_discover.py` 는 창 없이 터미널에 결과만 출력한다. 중단은 `Ctrl+C`.

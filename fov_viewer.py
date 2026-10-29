@@ -76,6 +76,8 @@ from femto_fov.fov_math import (
     project_border,
     valid_region_fov,
 )
+from ir_detect import detect as det
+from ir_detect.preprocess import to_u8
 from ir_detect.sources import CameraSource, Mode
 from ir_detect.sources.tis_dmk import TisDmkSource
 
@@ -108,6 +110,20 @@ class ViewFlags:
     grid: bool = False  # 각도 격자
     align: bool = True  # D2C 정렬
     auto: bool = False  # 화면 중앙 depth 를 거리로
+    detect: str = "off"  # off / apriltag / shapes / both
+    family: str = "tag36h11"
+    invert: bool = False  # 검출 전 영상 반전 (흰 테두리 태그, 어두운 바탕의 밝은 도형)
+
+    @property
+    def tags(self) -> bool:
+        return self.detect in ("apriltag", "both")
+
+    @property
+    def shapes(self) -> bool:
+        return self.detect in ("shapes", "both")
+
+
+DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +191,20 @@ def _nearest(options: list[float], v: float | None) -> int:
     return min(range(len(options)), key=lambda i: abs(options[i] - v))
 
 
+def detect_rows(flags: ViewFlags) -> list[MenuRow]:
+    """모든 장치에 공통인 인식 항목."""
+    fams = list(det.FAMILIES)
+    return [
+        MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect)),
+        MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0),
+        MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert)),
+    ]
+
+
+def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
+    return replace(flags, detect=m.row("detect").value, family=m.row("family").value, invert=bool(m.get("invert")))
+
+
 def build_orbbec_menu(labels: list[str], op: "Opened", target: Target, flags: ViewFlags) -> MenuState:
     ir_opts = [f"{w}x{h} {mode_name('ir', w, h)}" for w, h in op.ir_modes]
     ir_i = op.ir_modes.index(target.ires[:2]) if target.ires[:2] in op.ir_modes else 0
@@ -196,6 +226,7 @@ def build_orbbec_menu(labels: list[str], op: "Opened", target: Target, flags: Vi
         MenuRow("grid", "Angle grid", ["off", "on"], _onoff(flags.grid)),
         MenuRow("align", "D2C align", ["off", "on"], _onoff(flags.align)),
         MenuRow("auto", "Auto distance", ["off", "on"], _onoff(flags.auto)),
+        *detect_rows(flags),
     ]
 
     def on_adjust(m: MenuState, key: str) -> None:
@@ -218,7 +249,7 @@ def orbbec_menu_result(m: MenuState, op: "Opened") -> tuple[Target, ViewFlags]:
         bool(m.get("depth")),
         bool(m.get("color")),
     )
-    return t, ViewFlags(bool(m.get("grid")), bool(m.get("align")), bool(m.get("auto")))
+    return t, detect_flags(m, ViewFlags(bool(m.get("grid")), bool(m.get("align")), bool(m.get("auto"))))
 
 
 def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuState:
@@ -236,6 +267,7 @@ def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuSta
     ]
     if op.intr is not None:
         rows.append(MenuRow("grid", "Angle grid", ["off", "on"], _onoff(flags.grid)))
+    rows += detect_rows(flags)
 
     def on_adjust(m: MenuState, key: str) -> None:
         if key == "exp":
@@ -509,14 +541,16 @@ def show_message(w: int, h: int, lines: list[str], base: np.ndarray | None = Non
 class OrbbecView:
     """Femto 프레임 → 4 패널. depth 유효 영역 이동평균 등 프레임 간 상태를 들고 있다."""
 
-    def __init__(self, cell_w: int, cell_h: int):
+    def __init__(self, cell_w: int, cell_h: int, detp: det.Pipeline):
         self.cell_w, self.cell_h = cell_w, cell_h
         self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
+        self.detp = detp
         self.align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
         self.reset()
 
     def reset(self) -> None:
         self.last = {"color": None, "ir": None, "depth": None}
+        self.det = det.DetResult()
         self.valid_score = None  # depth 유효 픽셀 이동평균 (노이즈로 깜빡이는 픽셀 제거)
         self.hull = None  # 유효 영역 볼록 껍질 (depth 픽셀)
         self.vfov = None  # 유효 영역 FOV (10프레임마다 갱신)
@@ -612,6 +646,10 @@ class OrbbecView:
         if c_in_i is not None:
             viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
             ir_lines.append("magenta: color FOV")
+        if flags.detect != "off":
+            self.det = self.detp.run(to_u8(last["ir"]), flags.tags, flags.shapes, flags.family, flags.invert)
+            det.draw(ir, self.det, si)
+            ir_lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
 
         if has_color:
             sc = viz.fit_scale(ci.width, ci.height, cell_w, cell_h)
@@ -684,19 +722,37 @@ class OrbbecView:
         if ci is not None and di is not None:
             meta["depth_valid_covers_color_pct"] = round(self.cov["vc"] * 100, 2)
             meta["color_covers_depth_pct"] = round(self.cov["d"] * 100, 2)
+        meta.update(detection_meta(self.det))
         return meta
+
+
+def detection_meta(res: det.DetResult) -> dict:
+    if not res.backend and not res.shapes:
+        return {}
+    return {
+        "detection": {
+            "backend": res.backend,
+            "ms": round(res.ms, 1),
+            "tags": [{"id": t.id, "center": [round(v, 1) for v in t.center], "size_px": round(t.size_px, 1),
+                      "hamming": t.hamming, "margin": None if t.margin is None else round(t.margin, 1),
+                      "corners": np.round(t.corners, 1).tolist()} for t in res.tags],
+            "shapes": [{"name": s.name, "center": [round(v, 1) for v in s.center], "area_px": round(s.area)} for s in res.shapes],
+        }
+    }
 
 
 class TisView:
     """DMK 프레임 → IR 패널 하나 (나머지는 비움)."""
 
-    def __init__(self, cell_w: int, cell_h: int):
+    def __init__(self, cell_w: int, cell_h: int, detp: det.Pipeline):
         self.cell_w, self.cell_h = cell_w, cell_h
         self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
+        self.detp = detp
         self.reset()
 
     def reset(self) -> None:
         self.last = {"color": None, "ir": None, "depth": None}
+        self.det = det.DetResult()
         self.frame = None
 
     def ingest(self, frame) -> bool:
@@ -723,14 +779,20 @@ class TisView:
             lines.append(f"undist  {fov_undistorted(op.intr).short()}  (calib file)")
         else:
             lines.append("no calibration: FOV overlay unavailable (calib/dmk_<serial>.json)")
+        if flags.detect != "off":
+            self.det = self.detp.run(f.image, flags.tags, flags.shapes, flags.family, flags.invert)
+            det.draw(ir, self.det, s)
+            lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
         na = ["n/a for this device"]
         return [(ir, lines), (self.blank, na), (self.blank, na), (self.blank, na)]
 
     def snapshot_meta(self, op: Opened, fps: float) -> dict:
         f = self.frame
         src: TisDmkSource = op.source
-        return {"mode": str(f.mode), "fps_set": f.meta.get("fps_set"), "fps_measured": round(fps, 2),
+        meta = {"mode": str(f.mode), "fps_set": f.meta.get("fps_set"), "fps_measured": round(fps, 2),
                 "exposure_s": src.get_value("Exposure"), "gain_db": src.get_value("Gain")}
+        meta.update(detection_meta(self.det))
+        return meta
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +843,8 @@ def main() -> None:
             raise SystemExit(f"'{args.device}' 에 맞는 장치가 없습니다. 연결된 장치: {', '.join(labels)}")
 
     op = open_device(ctx, choices, dev_i, target, args.port)
-    views = {"orbbec": OrbbecView(cell_w, cell_h), "tis": TisView(cell_w, cell_h)}
+    detp = det.Pipeline()
+    views = {"orbbec": OrbbecView(cell_w, cell_h, detp), "tis": TisView(cell_w, cell_h, detp)}
     switcher = Switcher()
     canvas = None
     menu: MenuState | None = None
@@ -813,6 +876,7 @@ def main() -> None:
                                f"Switching to {describe(new_t)}")
         else:
             src: TisDmkSource = op.source
+            flags = detect_flags(m, flags)
             if m.has("grid"):
                 flags = replace(flags, grid=bool(m.get("grid")))
             if m.changed("exp_auto") and m.get("exp_auto"):

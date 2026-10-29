@@ -63,7 +63,7 @@ DMK 는 IR 패널 하나만 쓰고(depth/color 없음) 메뉴에 모드·노출�
 
 | 키 | 동작 |
 |---|---|
-| `e` | 설정 메뉴. Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기 |
+| `e` | 설정 메뉴. Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. 공통: Detect / Tag family / Invert image. `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기 |
 | `+/-`, `[ ]` | 경계선 투영 거리 ±100mm / ±1000mm |
 | `s` | 스냅샷 (PNG + 켜진 스트림의 depth npy / color PNG + JSON) 저장 |
 | `q` / `ESC` | 종료 |
@@ -150,6 +150,29 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 - 1024x1024 외의 해상도에서 패시브로 두면 IR 이 아닌 depth 같은 값이 나와 모드 목록에서 뺐다.
 - 같은 1024x1024 에서 액티브 ↔ 패시브를 바로 바꾸면 SDK 가 이전 모드를 유지한다 (프레임 없음 / 전부 0). 소스가 다른 해상도를 잠깐 열었다 닫아 자동으로 풀어 주며, 그만큼 전환이 ~1.3초 더 걸린다.
 
+### 라이브 인식 테스트 (AprilTag · 도형)
+
+뷰어 `e` 메뉴의 **Detect** 를 `apriltag` / `shapes` / `both` 로 두면 IR 패널에 검출 결과가 겹쳐 그려지고
+(초록 = 태그, 빨간 점 = 첫 코너, 주황 = 도형) 패널 글자에 `tags N [id…] shapes … ms` 요약이 나온다. 장치를 바꿔도 설정은 유지된다.
+
+| 항목 | 값 | 비고 |
+|---|---|---|
+| Detect | off / apriltag / shapes / both | 재시작 없이 즉시 적용 |
+| Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
+| Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
+
+- 태그: `pupil-apriltags` 가 있으면 그것(hamming / decision_margin 표시), 없으면 OpenCV ArUco. 두 검출기 모두 **검은 테두리** 를 찾는다.
+- 도형: Otsu 이진화 → 외곽선 → 다각형 근사. triangle / square / rect / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
+  어두운 장면에서는 큰 어두운 영역이 rect 로 잡히니 노출을 올리고 보자.
+- 검출은 폭 1280px 로 줄인 영상에서 하고 좌표는 원본으로 돌린다 (DMK 2448x2048 도 약 50ms).
+- `s` 스냅샷의 JSON 에 태그 id·중심·한 변 픽셀·코너, 도형 이름·중심·면적이 들어간다.
+- 저장된 영상으로 다시 돌리려면:
+
+```powershell
+.\.venv\Scripts\python detect_image.py resultsiewer_*_ir16.png --shapes          # 16비트 IR 스냅샷
+.\.venv\Scripts\python detect_image.py photo.png --family tag16h5 --invert           # 오버레이 *_det.png + *_det.json
+```
+
 ### AprilTag 파일 검증
 
 ```powershell
@@ -177,12 +200,14 @@ femto_fov/
 ir_detect/
   sources/      카메라 소스 공통 인터페이스 (base.py), Femto Bolt / Mega IR (orbbec_ir.py), DMK 33GX264 (tis_dmk.py)
   preprocess.py 센서 원본 → 8비트 변환
+  detect.py     AprilTag(pupil-apriltags / OpenCV ArUco) · 도형 검출, 오버레이 그리기
   gige.py       GigE Vision GVCP 탐색 / FORCEIP (SDK 없이 네트워크 확인)
   tags.py       AprilTag PNG 비트 대조, 합성 영상 검출 (OpenCV ArUco / pupil-apriltags)
 list_modes.py   카메라별 IR 모드 목록 / 실측
 gige_discover.py GigE Vision 카메라 탐색 / 임시 IP
 third_party/tisgrabber/  IC Imaging Control 3.x 래퍼 DLL (DMK 용, 출처는 안의 README)
 check_tags.py   april_tags/ 태그 파일 검증
+detect_image.py 저장된 영상에서 태그·도형 검출
 april_tags/     사용할 AprilTag PNG (apriltag-imgs 형식)
 tests/          단위 테스트 (장치 불필요): .\.venv\Scripts\python -m pytest
 results/        출력 (gitignore)
