@@ -1,23 +1,30 @@
-"""(b) 라이브 FOV 비교 뷰어: RGB / IR / Depth 를 동시에 띄우고 서로의 화각 경계를 겹쳐 그린다.
+"""(b) 라이브 뷰어: IR 을 기본으로 띄우고, Depth / RGB 는 켜고 끌 수 있다. 장치는 메뉴에서 바꾼다.
 
-패널 구성
-  [Color + depth 화각 경계]   [IR + color 화각 경계]
-     (cyan = depth 센서 사각형 화각, green = depth 값이 실제로 나오는 영역)
-  [Depth + color 화각 경계]   [Depth→Color 정렬 블렌드]
+장치
+  - Femto Bolt / Femto Mega (Orbbec SDK): IR + depth + color, 공장 캘리브레이션으로 화각 경계 오버레이
+  - DMK 33GX264 (The Imaging Source, GigE): IR 한 장만. 노출·게인을 메뉴에서 조절. 캘리브레이션 파일이 있으면 각도 격자
+
+패널 구성 (IR 이 기준 센서)
+  [IR + color 화각 경계]        [Color + IR/depth 화각 경계]
+     (magenta = color FOV)        (cyan = IR/depth 센서 사각형 화각, green = depth 값이 실제로 나오는 영역)
+  [Depth + color 화각 경계]     [Depth→Color 정렬 블렌드]
+  꺼진 스트림의 패널은 비워 둔다.
 
   - 경계선은 지정 거리(Z) 평면 기준이다. 시차(baseline) 때문에 거리마다 겹침 영역이 달라진다.
-  - 'auto' 모드에서는 화면 중앙의 실제 depth 중앙값을 거리로 사용한다.
+  - 'auto' 모드에서는 화면 중앙의 실제 depth 중앙값을 거리로 사용한다 (depth 가 켜져 있을 때).
   - Depth 패널의 'valid' FOV 는 실제로 깊이 값이 나온 픽셀의 각도 범위 (WFOV 원형 영역 확인용).
 
-    python fov_viewer.py
-    python fov_viewer.py --depth 1024x1024@15 --color 1920x1080
-    python fov_viewer.py --depth 640x576 --color 3840x2160@15 --distance 1500
+    python fov_viewer.py                                   # 첫 번째 장치, IR 만 (장치 기본 모드)
+    python fov_viewer.py --serial CL8764100GL              # Orbbec 장치 지정
+    python fov_viewer.py --ip 192.168.1.10                 # Femto Mega 이더넷 (자동 탐색 안 될 때)
+    python fov_viewer.py --device dmk                      # 이름에 'dmk' 가 들어간 장치로 시작
+    python fov_viewer.py --ir 1024x1024@15 --depth --color # 모드·스트림 지정해서 시작
 
-키:  +/- 거리 ±100mm   [ ] 거리 ±1000mm   a auto 거리   g 각도 격자   d D2C 정렬 on/off
-     m / M  depth 모드 다음/이전 (NFOV binned → NFOV → WFOV binned → WFOV, IR 도 같이 바뀜)
-     c / C  color 해상도 다음/이전 (16:9 ↔ 4:3 포함)
-     s 스냅샷 저장   q/ESC 종료
-  fps 는 두 스트림이 공통으로 지원하는 최댓값으로 자동 선택된다 (WFOV unbinned 는 15fps).
+키:  e 설정 메뉴   메뉴 안: ↑↓(w/s) 항목   ←→(a/d) 값 변경   Enter 적용   Esc/e 닫기
+     +/- 거리 ±100mm   [ ] 거리 ±1000mm   s 스냅샷 저장   q/ESC 종료
+  스트림 구성이나 장치를 바꾸면 재시작 (Bolt USB ~4초, Mega 이더넷 ~2초, DMK ~1초). 그동안 창은 계속 반응한다.
+  fps 는 켜진 스트림이 공통으로 지원하는 최댓값으로 자동 선택된다 (메뉴에서 고정 가능).
+  Femto 의 IR 과 depth 는 같은 센서라 항상 같은 모드로 켜진다.
 """
 
 from __future__ import annotations
@@ -26,29 +33,36 @@ import argparse
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
 
 from femto_fov import viz
 from femto_fov.device import (
+    DEFAULT_NET_PORT,
     AlignFilter,
     Config,
+    Context,
+    DeviceEntry,
     OBError,
     OBStreamType,
+    Pipeline,
     color_to_bgr,
     depth_to_mm,
     device_summary,
+    enumerate_devices,
     extrinsic_Rt,
     find_profile,
+    get_device,
     ir_to_u16,
     list_profiles,
     mode_name,
-    open_pipeline,
     parse_res,
+    quiet_sdk_log,
     to_intrinsics,
     unique_resolutions,
 )
@@ -62,367 +76,413 @@ from femto_fov.fov_math import (
     project_border,
     valid_region_fov,
 )
+from ir_detect.sources import CameraSource, Mode
+from ir_detect.sources.tis_dmk import TisDmkSource
 
-WIN = "Femto FOV viewer"
+WIN = "IR camera viewer"
+
+# cv2.waitKeyEx 의 화살표 코드 (Windows / Linux-GTK)
+KEY_UP = {2490368, 65362}
+KEY_DOWN = {2621440, 65364}
+KEY_LEFT = {2424832, 65361}
+KEY_RIGHT = {2555904, 65363}
+KEY_ENTER = {13, 10}
+KEY_ESC = 27
+
+EXPOSURE_MS = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200]
+GAIN_DB = [0, 3, 6, 9, 12, 18, 24, 30, 36, 42, 48]
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--color", help="color 해상도 WxH[@fps] (기본: 장치 기본값)")
-    ap.add_argument("--depth", help="depth 해상도 WxH[@fps] (Femto: 640x576 / 320x288 / 1024x1024 / 512x512)")
-    ap.add_argument("--no-ir", action="store_true", help="IR 스트림 끄기")
-    ap.add_argument("--distance", type=float, default=1000.0, help="경계선 투영 거리 mm (기본 1000)")
-    ap.add_argument("--out", type=Path, default=Path("results"), help="스냅샷 저장 폴더")
-    ap.add_argument("--cell", default="800x600", help="패널 하나 크기 WxH")
-    args = ap.parse_args()
+@dataclass(frozen=True)
+class Target:
+    """원하는 스트림 구성. ires/cres = (w, h, fps), 0 은 장치 기본값. IR 은 항상 켠다."""
 
-    cell_w, cell_h = map(int, args.cell.lower().split("x"))
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, cell_w * 2, cell_h * 2)
-    show_message(cell_w * 2, cell_h * 2, ["Connecting to Femto...", "(device open ~3s + stream start ~2s)"])
+    ires: tuple = (0, 0, 0)  # IR 모드 (depth 도 같은 모드). fps 0 = 자동
+    cres: tuple = (0, 0, 0)  # color 해상도 (꺼져 있어도 기억해 둔다)
+    depth: bool = False
+    color: bool = False
 
-    pipeline = open_pipeline()
-    summary = device_summary(pipeline)
-    print(summary)
 
-    # 전환 가능한 모드 목록 (해상도별 1개)
-    depth_modes = sorted(
-        (p.key for p in unique_resolutions(list_profiles(pipeline, "depth"))),
-        key=lambda r: (mode_name("depth", *r).startswith("WFOV"), r[0] * r[1]),
-    )  # NFOV binned → NFOV → WFOV binned → WFOV
-    color_modes = [p.key for p in unique_resolutions(list_profiles(pipeline, "color"))]
+@dataclass
+class ViewFlags:
+    grid: bool = False  # 각도 격자
+    align: bool = True  # D2C 정렬
+    auto: bool = False  # 화면 중앙 depth 를 거리로
 
-    st = start_streams(pipeline, parse_res(args.color), parse_res(args.depth), not args.no_ir)
-    align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
-    switcher = Switcher(pipeline)
-    pending, pending_t = None, 0.0  # 연타 묶기: 마지막 키 후 SWITCH_DEBOUNCE 초 지나면 전환 시작
-    canvas = None
 
-    distance = args.distance
-    auto = False
-    show_grid = False
-    do_align = True
-    last = {"color": None, "ir": None, "depth": None}
-    valid_score = None  # depth 유효 픽셀 이동평균 (노이즈로 깜빡이는 픽셀 제거)
-    hull = None  # 유효 영역 볼록 껍질 (depth 픽셀)
-    vfov = None  # 유효 영역 FOV (10프레임마다 갱신)
-    frame_i = 0
-    fps_t, fps_n, fps = time.time(), 0, 0.0
-    toast, toast_until = "", 0.0  # 모드 전환 안내 메시지
+# ---------------------------------------------------------------------------
+# 설정 메뉴 (로직만, 그리기는 draw_menu)
+# ---------------------------------------------------------------------------
 
-    try:
-        while True:
-            # --- 모드 전환 처리 (파이프라인 재시작은 드라이버 때문에 ~4초 걸려 백그라운드에서) ---
-            if switcher.busy:
-                target = pending or switcher.target
-                show_message(
-                    cell_w * 2, cell_h * 2,
-                    [f"Switching to {describe(*target)}  ({time.time() - switcher.started:.1f}s)",
-                     "camera driver needs ~4s to restart streams",
-                     "m/M c/C: change target   q: quit"],
-                    base=canvas,
-                )
-                k = cv2.waitKey(30) & 0xFF
-                if k in (ord("q"), 27):
-                    switcher.join()
-                    break
-                if k in MODE_KEYS:
-                    pending = next_mode(k, target, depth_modes, color_modes)
-                    pending_t = time.time()
-                continue
-            if switcher.result is not None:
-                st, toast = switcher.take_result()
-                if pending == (st.cres, st.dres):
-                    pending = None
-                align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)  # 프로파일 캐시 초기화
-                toast_until = time.time() + 3
-                last = {"color": None, "ir": None, "depth": None}
-                valid_score, hull = None, None
-            if pending is not None and time.time() - pending_t >= SWITCH_DEBOUNCE:
-                if pending != (st.cres, st.dres):
-                    switcher.start(st, *pending)
-                pending = None
-                continue
 
-            ci, di, ii, ir_p = st.ci, st.di, st.ii, st.ir_p
-            R_dc, t_dc, R_cd, t_cd, R_ci, t_ci = st.R_dc, st.t_dc, st.R_cd, st.t_cd, st.R_ci, st.t_ci
-            static = st.static
-            frames = pipeline.wait_for_frames(1000)
-            if frames is None:
-                if _key_loop() == "quit":
-                    break
-                continue
+@dataclass
+class MenuRow:
+    key: str
+    label: str
+    options: list  # 표시 문자열 목록
+    index: int = 0
 
-            cf, df = frames.get_color_frame(), frames.get_depth_frame()
-            irf = frames.get_ir_frame() if ir_p is not None else None
-            if cf is not None:
-                img = color_to_bgr(cf)
-                if img is not None:
-                    last["color"] = img
-            if df is not None:
-                last["depth"] = depth_to_mm(df)
-            if irf is not None:
-                last["ir"] = ir_to_u16(irf)
+    @property
+    def value(self) -> str:
+        return self.options[self.index]
 
-            aligned = None
-            if do_align and cf is not None and df is not None:
-                try:
-                    out = align.process(frames)
-                    if out is not None:
-                        fs = out.as_frame_set() if hasattr(out, "as_frame_set") else out
-                        adf = fs.get_depth_frame()
-                        if adf is not None:
-                            aligned = depth_to_mm(adf)
-                except Exception:
-                    aligned = None
 
-            if last["color"] is None or last["depth"] is None:
-                continue
+class MenuState:
+    """↑↓ 로 항목, ←→ 로 값을 바꾸고 Enter 로 한꺼번에 적용한다 (재시작은 한 번만).
+    on_adjust(menu, key) 로 항목 간 연동(모드 바꾸면 fps 목록 갱신 등)을 건다."""
 
-            depth = last["depth"]
-            if auto:
-                h, w = depth.shape
-                c = depth[h // 2 - 10 : h // 2 + 10, w // 2 - 10 : w // 2 + 10]
-                c = c[c > 0]
-                if c.size:
-                    distance = float(np.median(c))
+    def __init__(self, rows: list[MenuRow], on_adjust: Callable[["MenuState", str], None] | None = None):
+        self._rows = rows
+        self._on_adjust = on_adjust
+        self.sel = 0
+        self.initial = {r.key: r.index for r in rows}
 
-            # --- 실제 depth 유효 영역 (센서 사각형이 아니라 값이 나오는 영역) ---
-            cur = (depth > 0).astype(np.float32)
-            if valid_score is None or valid_score.shape != cur.shape:
-                valid_score = cur
-            else:
-                cv2.accumulateWeighted(cur, valid_score, 0.1)  # 이동평균 (in-place)
-            frame_i += 1
-            if hull is None or frame_i % 10 == 0:  # 무거운 계산은 10프레임마다
-                valid_mask = valid_score > 0.2
-                nz = cv2.findNonZero(valid_mask.astype(np.uint8))
-                hull = cv2.convexHull(nz).reshape(-1, 2).astype(np.float64) if nz is not None else None
-                vfov = valid_region_fov(valid_mask, di)
+    def row(self, key: str) -> MenuRow:
+        return next(r for r in self._rows if r.key == key)
 
-            # --- 경계 투영 (원본 픽셀 좌표) ---
-            d_in_c = project_border(di, ci, R_dc, t_dc, distance)
-            c_in_d = project_border(ci, di, R_cd, t_cd, distance)
-            c_in_i = project_border(ci, ii, R_ci, t_ci, distance)
-            cov_c, _ = overlap_ratio(d_in_c, ci.width, ci.height)
-            cov_d, _ = overlap_ratio(c_in_d, di.width, di.height)
-            v_in_c, cov_vc = None, float("nan")
-            if hull is not None and len(hull) >= 3:
-                v_in_c = project_between(hull, distance, di, ci, R_dc, t_dc)
-                cov_vc, _ = overlap_ratio(v_in_c, ci.width, ci.height)
+    def has(self, key: str) -> bool:
+        return any(r.key == key for r in self._rows)
 
-            # 각 패널은 표시 크기로 먼저 줄인 뒤 그린다 (원본 해상도에서 그리면 WFOV/4K 에서 매우 느림)
-            sc = viz.fit_scale(ci.width, ci.height, cell_w, cell_h)
-            sd = viz.fit_scale(di.width, di.height, cell_w, cell_h)
-            si = viz.fit_scale(ii.width, ii.height, cell_w, cell_h)
+    def get(self, key: str) -> int:
+        return self.row(key).index
 
-            # --- color 패널 ---
-            color_small = viz.shrink(last["color"], sc)
-            color = color_small.copy()
-            if show_grid:
-                viz.draw_angle_grid(color, ci.scaled(sc))
-            viz.draw_polygon(color, d_in_c * sc, viz.CYAN, 2)
-            if v_in_c is not None:
-                viz.draw_polygon(color, v_in_c * sc, viz.GREEN, 2)
-            fw, fh = footprint_at_distance(static["color"][1], distance)
-            color_lines = [
-                f"COLOR {ci.width}x{ci.height} ({mode_name('color', ci.width, ci.height)})",
-                f"pinhole {static['color'][0].short()}",
-                f"undist  {static['color'][1].short()}",
-                f"@{distance:.0f}mm view = {fw:.0f} x {fh:.0f} mm",
-                f"cyan : depth sensor FOV, covers {cov_c * 100:.1f}% of color",
-                f"green: depth valid area, covers {cov_vc * 100:.1f}% of color",
-            ]
+    def set(self, key: str, index: int) -> None:
+        self.row(key).index = index
 
-            # --- IR 패널 ---
-            if last["ir"] is not None:
-                ir = viz.normalize_ir(viz.shrink(last["ir"], si))
-                if show_grid:
-                    viz.draw_angle_grid(ir, ii.scaled(si))
-                viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
-                ir_lines = [
-                    f"IR {ii.width}x{ii.height} ({mode_name('ir', ii.width, ii.height)})",
-                    f"pinhole {static['ir'][0].short()}",
-                    f"undist  {static['ir'][1].short()}",
-                    "magenta: color FOV",
-                ]
-            else:
-                ir = np.zeros((480, 640, 3), np.uint8)
-                ir_lines = ["IR disabled"]
+    def changed(self, key: str) -> bool:
+        return self.has(key) and self.get(key) != self.initial[key]
 
-            # --- depth 패널 ---
-            dimg = viz.colorize_depth(viz.shrink(depth, sd, nearest=True))
-            if show_grid:
-                viz.draw_angle_grid(dimg, di.scaled(sd))
-            viz.draw_polygon(dimg, c_in_d * sd, viz.MAGENTA, 2)
-            if hull is not None:
-                viz.draw_polygon(dimg, hull * sd, viz.GREEN, 1)
-            depth_lines = [
-                f"DEPTH {di.width}x{di.height} ({mode_name('depth', di.width, di.height)})",
-                f"pinhole {static['depth'][0].short()}",
-                f"undist  {static['depth'][1].short()}",
-                f"valid   {vfov.short()}",
-                f"magenta: color FOV, covers {cov_d * 100:.1f}% of depth",
-            ]
+    def rows(self) -> list[tuple[str, str]]:
+        return [(r.label, r.value) for r in self._rows]
 
-            # --- 정렬 블렌드 ---
-            if aligned is not None and aligned.shape[:2] == last["color"].shape[:2]:
-                small_d = viz.shrink(aligned, sc, nearest=True)
-                blend = cv2.addWeighted(color_small, 0.5, viz.colorize_depth(small_d), 0.5, 0)
-                blend_lines = [
-                    "Depth aligned to Color (D2C)",
-                    f"color pixels with depth: {(small_d > 0).mean() * 100:.1f}%",
-                ]
-            else:
-                blend = np.zeros_like(color)
-                blend_lines = ["D2C align off (d)" if not do_align else "D2C align unavailable"]
+    def move(self, d: int) -> None:
+        self.sel = (self.sel + d) % len(self._rows)
 
-            fps_n += 1
-            if time.time() - fps_t >= 1.0:
-                fps, fps_n, fps_t = fps_n / (time.time() - fps_t), 0, time.time()
-            canvas = viz.grid(
-                [(color, color_lines), (ir, ir_lines), (dimg, depth_lines), (blend, blend_lines)],
-                2,
-                cell_w,
-                cell_h,
-            )
-            viz.put_text(
-                canvas,
-                f"Z={distance:.0f}mm {'(auto)' if auto else ''}  {fps:.1f}fps   "
-                "+/- [ ] dist  a auto  g grid  d align  m/M depth mode  c/C color res  s save  q quit",
-                (10, canvas.shape[0] - 10),
-                0.5,
-                viz.YELLOW,
-            )
-            if pending is not None:
-                viz.put_text(canvas, f"next: {describe(*pending)}", (10, canvas.shape[0] - 40), 0.7, viz.YELLOW)
-            elif time.time() < toast_until:
-                viz.put_text(canvas, toast, (10, canvas.shape[0] - 40), 0.7, viz.YELLOW)
-            cv2.imshow(WIN, canvas)
+    def adjust(self, d: int) -> None:
+        r = self._rows[self.sel]
+        r.index = (r.index + d) % len(r.options)
+        if self._on_adjust:
+            self._on_adjust(self, r.key)
 
-            k = cv2.waitKey(1) & 0xFF
-            if k in (ord("q"), 27):
-                break
-            if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
-                break
-            if k in (ord("+"), ord("=")):
-                distance += 100
-            elif k == ord("-"):
-                distance = max(100, distance - 100)
-            elif k == ord("]"):
-                distance += 1000
-            elif k == ord("["):
-                distance = max(100, distance - 1000)
-            elif k == ord("a"):
-                auto = not auto
-            elif k == ord("g"):
-                show_grid = not show_grid
-            elif k == ord("d"):
-                do_align = not do_align
-            elif k in MODE_KEYS:
-                base = pending or (st.cres, st.dres)
-                pending = next_mode(k, base, depth_modes, color_modes)
-                pending_t = time.time()
-            elif k == ord("s"):
-                save_snapshot(
-                    args.out,
-                    canvas,
-                    last,
-                    {
-                        "device": summary,
-                        "distance_mm": distance,
-                        "color": {"res": [ci.width, ci.height], "pinhole": static["color"][0].as_dict(),
-                                  "undistorted": static["color"][1].as_dict()},
-                        "depth": {"res": [di.width, di.height], "pinhole": static["depth"][0].as_dict(),
-                                  "undistorted": static["depth"][1].as_dict(), "valid": vfov.as_dict()},
-                        "depth_valid_covers_color_pct": round(cov_vc * 100, 2),
-                        "ir": {"res": [ii.width, ii.height], "pinhole": static["ir"][0].as_dict(),
-                               "undistorted": static["ir"][1].as_dict()},
-                        "depth_covers_color_pct": round(cov_c * 100, 2),
-                        "color_covers_depth_pct": round(cov_d * 100, 2),
-                        "depth_to_color_t_mm": np.round(t_dc, 3).tolist(),
-                    },
-                )
-    finally:
-        pipeline.stop()
-        cv2.destroyAllWindows()
+
+def _onoff(v: bool) -> int:
+    return 1 if v else 0
+
+
+def _nearest(options: list[float], v: float | None) -> int:
+    if v is None:
+        return 0
+    return min(range(len(options)), key=lambda i: abs(options[i] - v))
+
+
+def build_orbbec_menu(labels: list[str], op: "Opened", target: Target, flags: ViewFlags) -> MenuState:
+    ir_opts = [f"{w}x{h} {mode_name('ir', w, h)}" for w, h in op.ir_modes]
+    ir_i = op.ir_modes.index(target.ires[:2]) if target.ires[:2] in op.ir_modes else 0
+    c_opts = [f"{w}x{h} ({mode_name('color', w, h)})" for w, h in op.color_modes]
+    c_i = op.color_modes.index(target.cres[:2]) if target.cres[:2] in op.color_modes else 0
+
+    def fps_options(i: int) -> list[str]:
+        return ["auto"] + [str(f) for f in sorted(op.fps_by_mode.get(op.ir_modes[i], ()))]
+
+    fps_o = fps_options(ir_i)
+    fps_i = fps_o.index(str(target.ires[2])) if str(target.ires[2]) in fps_o else 0
+    rows = [
+        MenuRow("dev", "Device", labels, op.dev),
+        MenuRow("ir", "IR mode", ir_opts, ir_i),
+        MenuRow("fps", "FPS", fps_o, fps_i),
+        MenuRow("depth", "Depth", ["off", "on"], _onoff(target.depth)),
+        MenuRow("color", "Color", ["off", "on"], _onoff(target.color)),
+        MenuRow("cres", "Color res", c_opts, c_i),
+        MenuRow("grid", "Angle grid", ["off", "on"], _onoff(flags.grid)),
+        MenuRow("align", "D2C align", ["off", "on"], _onoff(flags.align)),
+        MenuRow("auto", "Auto distance", ["off", "on"], _onoff(flags.auto)),
+    ]
+
+    def on_adjust(m: MenuState, key: str) -> None:
+        if key == "ir":  # 모드가 바뀌면 그 모드의 fps 목록으로. 없는 값이면 auto
+            r = m.row("fps")
+            cur = r.value
+            r.options = fps_options(m.get("ir"))
+            r.index = r.options.index(cur) if cur in r.options else 0
+        elif key == "cres":  # 해상도를 고르면 color 를 켠다
+            m.set("color", 1)
+
+    return MenuState(rows, on_adjust)
+
+
+def orbbec_menu_result(m: MenuState, op: "Opened") -> tuple[Target, ViewFlags]:
+    fps = m.row("fps").value
+    t = Target(
+        (*op.ir_modes[m.get("ir")], 0 if fps == "auto" else int(fps)),
+        (*op.color_modes[m.get("cres")], 0),
+        bool(m.get("depth")),
+        bool(m.get("color")),
+    )
+    return t, ViewFlags(bool(m.get("grid")), bool(m.get("align")), bool(m.get("auto")))
+
+
+def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuState:
+    src: TisDmkSource = op.source
+    mode_opts = [f"{m.pixel_format} {m.res}" for m in op.modes]
+    mode_i = op.modes.index(src.mode) if src.mode in op.modes else 0
+    exp = src.get_value("Exposure")
+    rows = [
+        MenuRow("dev", "Device", labels, op.dev),
+        MenuRow("mode", "Mode", mode_opts, mode_i),
+        MenuRow("exp_auto", "Exposure auto", ["off", "on"], _onoff(src.get_auto("Exposure"))),
+        MenuRow("exp", "Exposure (ms)", [f"{v:g}" for v in EXPOSURE_MS], _nearest(EXPOSURE_MS, exp * 1000 if exp else None)),
+        MenuRow("gain_auto", "Gain auto", ["off", "on"], _onoff(src.get_auto("Gain"))),
+        MenuRow("gain", "Gain (dB)", [str(v) for v in GAIN_DB], _nearest(GAIN_DB, src.get_value("Gain"))),
+    ]
+    if op.intr is not None:
+        rows.append(MenuRow("grid", "Angle grid", ["off", "on"], _onoff(flags.grid)))
+
+    def on_adjust(m: MenuState, key: str) -> None:
+        if key == "exp":
+            m.set("exp_auto", 0)
+        elif key == "gain":
+            m.set("gain_auto", 0)
+
+    return MenuState(rows, on_adjust)
+
+
+def draw_menu(canvas: np.ndarray, menu: MenuState) -> None:
+    rows = menu.rows()
+    label_w = 160
+    value_w = max(260, max(len(v) for _, v in rows) * 11 + 40)
+    w, h = label_w + value_w + 40, 36 * (len(rows) + 2) + 20
+    x0, y0 = 30, 30
+    box = canvas[y0 : y0 + h, x0 : x0 + w]
+    box[:] = (box * 0.25).astype(np.uint8)
+    cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), viz.YELLOW, 1)
+    for i, (label, value) in enumerate(rows):
+        y = y0 + 36 * (i + 1)
+        color = viz.YELLOW if i == menu.sel else viz.WHITE
+        if i == menu.sel:
+            cv2.rectangle(canvas, (x0 + 6, y - 24), (x0 + w - 6, y + 10), (60, 60, 60), -1)
+        viz.put_text(canvas, label, (x0 + 16, y), 0.6, color)
+        viz.put_text(canvas, f"<  {value}  >" if i == menu.sel else value, (x0 + label_w, y), 0.6, color)
+    viz.put_text(canvas, "up/down select   left/right change   Enter apply   Esc close",
+                 (x0 + 16, y0 + h - 12), 0.5, viz.YELLOW)
+
+
+# ---------------------------------------------------------------------------
+# 장치 / 스트림
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class Session:
-    color_p: object
-    depth_p: object
+    target: Target  # 실제로 켜진 구성 (해상도는 확정값)
     ir_p: object
+    depth_p: object | None
+    color_p: object | None
     fps: int
-    ci: Intrinsics
-    di: Intrinsics
     ii: Intrinsics
-    R_dc: np.ndarray
-    t_dc: np.ndarray
-    R_cd: np.ndarray
-    t_cd: np.ndarray
-    R_ci: np.ndarray
-    t_ci: np.ndarray
-    static: dict
-
-    @property
-    def cres(self) -> tuple:
-        return (self.ci.width, self.ci.height, 0)
-
-    @property
-    def dres(self) -> tuple:
-        return (self.di.width, self.di.height, 0)
+    di: Intrinsics | None
+    ci: Intrinsics | None
+    R_ic: np.ndarray | None = None  # IR → color
+    t_ic: np.ndarray | None = None
+    R_ci: np.ndarray | None = None  # color → IR
+    t_ci: np.ndarray | None = None
+    R_dc: np.ndarray | None = None  # depth → color
+    t_dc: np.ndarray | None = None
+    R_cd: np.ndarray | None = None  # color → depth
+    t_cd: np.ndarray | None = None
+    static: dict = field(default_factory=dict)
 
 
-SWITCH_DEBOUNCE = 0.5
-MODE_KEYS = (ord("m"), ord("M"), ord("c"), ord("C"))
+@dataclass
+class DeviceChoice:
+    kind: str  # "orbbec" | "tis"
+    label: str
+    entry: DeviceEntry | None = None  # orbbec
+    tis_name: str = ""  # tis unique name
 
 
-def describe(cres: tuple, dres: tuple) -> str:
-    return f"depth {dres[0]}x{dres[1]} {mode_name('depth', dres[0], dres[1])} / color {cres[0]}x{cres[1]}"
+@dataclass
+class Opened:
+    """열린 장치 하나. Orbbec 은 pipeline + st, TIS 는 source + modes."""
+
+    dev: int
+    kind: str
+    summary: str
+    pipeline: Pipeline | None = None
+    ir_modes: list = field(default_factory=list)
+    color_modes: list = field(default_factory=list)
+    fps_by_mode: dict = field(default_factory=dict)
+    st: Session | None = None
+    source: CameraSource | None = None
+    modes: list = field(default_factory=list)
+    intr: Intrinsics | None = None
+
+    def close(self) -> None:
+        if self.pipeline is not None:
+            self.pipeline.stop()
+        if self.source is not None:
+            self.source.close()
+        self.pipeline = self.source = None
 
 
-def next_mode(k: int, base: tuple, depth_modes: list, color_modes: list) -> tuple:
-    """base=(cres, dres) 에서 키에 따라 다음/이전 모드."""
-    cres, dres = base
-    is_depth = k in (ord("m"), ord("M"))
-    modes = depth_modes if is_depth else color_modes
-    cur = (dres if is_depth else cres)[:2]
-    i = modes.index(cur) if cur in modes else 0
-    nxt = modes[(i + (1 if k in (ord("m"), ord("c")) else -1)) % len(modes)]
-    return (cres, (*nxt, 0)) if is_depth else ((*nxt, 0), dres)
+def device_label(e: DeviceEntry) -> str:
+    s = f"{e.name.replace('Orbbec ', '')} {e.connection} {e.serial}"
+    return f"{s} {e.ip}" if e.ip else s
+
+
+def find_devices(ctx: Context, ip: str) -> list[DeviceChoice]:
+    out = []
+    if ip:
+        out.append(DeviceChoice("orbbec", f"Femto Mega Ethernet {ip}", DeviceEntry("Femto Mega", "", "Ethernet", ip)))
+    out += [DeviceChoice("orbbec", device_label(e), e) for e in enumerate_devices(ctx)]
+    ok, why = TisDmkSource.available()
+    if ok:
+        out += [DeviceChoice("tis", s.unique_name + " GigE", tis_name=s.unique_name) for s in TisDmkSource.discover()]
+    else:
+        print(f"[tis] {why}")
+    return out
+
+
+def open_device(ctx: Context, choices: list[DeviceChoice], i: int, target: Target, port: int,
+                mode: Mode | None = None) -> Opened:
+    """장치를 열고 스트림 시작. target 의 해상도가 이 장치에 없으면 기본값으로."""
+    c = choices[i]
+    if c.kind == "tis":
+        src = TisDmkSource(c.label, c.tis_name)
+        src.open()
+        modes = src.modes()
+        if mode is None:  # 기본: 100 Mbps 링크에서도 볼 만한 1280x960 Y800, 없으면 첫 모드
+            mode = next((m for m in modes if m.res == "1280x960" and m.pixel_format == "Y800"), modes[0])
+        src.start(mode)
+        info = src.info()
+        summary = "  ".join(f"{k}={v}" for k, v in info.items())
+        print(summary)
+        return Opened(i, "tis", summary, source=src, modes=modes, intr=src.intrinsics(mode))
+
+    e = c.entry
+    dev = get_device(ctx, ip=e.ip, port=port) if e.serial == "" else get_device(ctx, serial=e.serial)
+    pipeline = Pipeline(dev)
+    ir_modes = sorted(
+        (p.key for p in unique_resolutions(list_profiles(pipeline, "ir"))),
+        key=lambda r: (mode_name("ir", *r).startswith("WFOV"), r[0] * r[1]),
+    )  # NFOV binned → NFOV → WFOV binned → WFOV
+    color_modes = [p.key for p in unique_resolutions(list_profiles(pipeline, "color"))]
+    fps_by_mode: dict = {}
+    for p in list_profiles(pipeline, "ir"):
+        fps_by_mode.setdefault(p.key, set()).add(p.fps)
+    if target.ires[:2] not in ir_modes:
+        target = replace(target, ires=(0, 0, target.ires[2]))
+    if target.cres[:2] not in color_modes:
+        target = replace(target, cres=(0, 0, 0))
+    summary = device_summary(pipeline)
+    print(summary)
+    st = start_streams(pipeline, target)
+    return Opened(i, "orbbec", summary, pipeline, ir_modes, color_modes, fps_by_mode, st)
+
+
+def describe(t: Target) -> str:
+    ir = f"IR {t.ires[0]}x{t.ires[1]} {mode_name('ir', t.ires[0], t.ires[1])}" if t.ires[0] else "IR default"
+    if t.ires[2]:
+        ir += f"@{t.ires[2]}"
+    depth = "depth on" if t.depth else "depth off"
+    color = (f"color {t.cres[0]}x{t.cres[1]}" if t.cres[0] else "color default") if t.color else "color off"
+    return f"{ir} / {depth} / {color}"
+
+
+def resolve_target(pipeline, t: Target) -> Target:
+    """해상도 0 (기본값) 을 장치 기본 프로파일의 해상도로 확정."""
+    ires, cres = t.ires, t.cres
+    if ires[0] == 0:
+        p = find_profile(pipeline, "ir")
+        ires = (p.get_width(), p.get_height(), ires[2])
+    if t.color and cres[0] == 0:
+        p = find_profile(pipeline, "color")
+        cres = (p.get_width(), p.get_height(), cres[2])
+    return replace(t, ires=ires, cres=cres)
+
+
+def common_fps(pipeline, t: Target) -> int:
+    """켜진 스트림이 모두 지원하는 가장 높은 fps (예: Bolt WFOV 1024x1024 는 15fps 까지)."""
+    def fps_set(sensor, w, h):
+        return {p.fps for p in list_profiles(pipeline, sensor) if p.key == (w, h)}
+
+    sets = [fps_set("ir", *t.ires[:2])]
+    if t.depth:
+        sets.append(fps_set("depth", *t.ires[:2]))
+    if t.color:
+        sets.append(fps_set("color", *t.cres[:2]))
+    both = set.intersection(*sets)
+    want = t.ires[2] or (t.cres[2] if t.color else 0)
+    if want and want in both:
+        return want
+    if not both:
+        raise OBError(f"공통 fps 없음: {describe(t)}")
+    return max(both)
+
+
+def start_streams(pipeline, target: Target, running: bool = False) -> Session:
+    """스트림 프로파일 선택 → 파이프라인 (재)시작. IR 은 항상, depth/color 는 target 에 따라."""
+    if running:
+        pipeline.stop()
+    t = resolve_target(pipeline, target)
+    fps = common_fps(pipeline, t)
+    w, h = t.ires[:2]
+    ir_p = find_profile(pipeline, "ir", w, h, fps)
+    depth_p = find_profile(pipeline, "depth", w, h, fps) if t.depth else None  # IR 과 같은 센서/모드
+    color_p = find_profile(pipeline, "color", t.cres[0], t.cres[1], fps) if t.color else None
+
+    config = Config()
+    for p, name in ((ir_p, "ir"), (depth_p, "depth"), (color_p, "color")):
+        if p is not None:
+            config.enable_stream(p)
+            print(f"  {name:5}: {p.get_width()}x{p.get_height()}@{p.get_fps()} {p.get_format().name}")
+
+    ii = to_intrinsics(ir_p)
+    di = to_intrinsics(depth_p) if depth_p is not None else None
+    ci = to_intrinsics(color_p) if color_p is not None else None
+    s = Session(t, ir_p, depth_p, color_p, ir_p.get_fps(), ii, di, ci)
+    if color_p is not None:
+        s.R_ic, s.t_ic = extrinsic_Rt(ir_p, color_p)
+        s.R_ci, s.t_ci = extrinsic_Rt(color_p, ir_p)
+        print(f"  IR→color baseline t = {np.round(s.t_ic, 2)} mm")
+        if depth_p is not None:
+            s.R_dc, s.t_dc = extrinsic_Rt(depth_p, color_p)
+            s.R_cd, s.t_cd = extrinsic_Rt(color_p, depth_p)
+    s.static = {"ir": (fov_pinhole(ii), fov_undistorted(ii))}
+    if di is not None:
+        s.static["depth"] = (fov_pinhole(di), fov_undistorted(di))
+    if ci is not None:
+        s.static["color"] = (fov_pinhole(ci), fov_undistorted(ci))
+    try:
+        pipeline.enable_frame_sync()
+    except Exception:
+        pass
+    pipeline.start(config)
+    return s
 
 
 class Switcher:
-    """파이프라인 재시작을 백그라운드 스레드에서 수행 (그동안 UI 는 계속 반응)."""
+    """재시작/장치 전환을 백그라운드 스레드에서 수행 (그동안 UI 는 계속 반응)."""
 
-    def __init__(self, pipeline):
-        self.pipeline = pipeline
+    def __init__(self):
         self.thread: threading.Thread | None = None
         self.result: tuple | None = None
-        self.target: tuple | None = None
+        self.label = ""
         self.started = 0.0
 
     @property
     def busy(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
 
-    def start(self, cur: Session, cres: tuple, dres: tuple) -> None:
-        self.target = (cres, dres)
-        self.started = time.time()
-        self.thread = threading.Thread(target=self._run, args=(cur, cres, dres), daemon=True)
+    def start(self, fn, label: str) -> None:
+        self.label, self.started, self.result = label, time.time(), None
+        self.thread = threading.Thread(target=self._run, args=(fn,), daemon=True)
         self.thread.start()
 
-    def _run(self, cur: Session, cres: tuple, dres: tuple) -> None:
-        use_ir = cur.ir_p is not None
+    def _run(self, fn) -> None:
         try:
-            new = start_streams(self.pipeline, cres, dres, use_ir, running=True)
-            toast = f"{describe(new.cres, new.dres)} @ {new.fps}fps  ({time.time() - self.started:.1f}s)"
-        except Exception as e:  # 지원하지 않는 조합이면 이전 모드로 복구
-            print(f"모드 전환 실패: {e}")
-            new = start_streams(self.pipeline, cur.cres, cur.dres, use_ir, running=False)
-            toast = "switch failed - reverted"
-        self.result = (new, toast)
+            self.result = (fn(), None)
+        except Exception as e:  # noqa: BLE001
+            self.result = (None, e)
 
     def take_result(self) -> tuple:
         r, self.result = self.result, None
@@ -441,76 +501,461 @@ def show_message(w: int, h: int, lines: list[str], base: np.ndarray | None = Non
     cv2.waitKey(1)
 
 
-def common_fps(pipeline, cres: tuple, dres: tuple) -> int:
-    """color/depth 해상도가 둘 다 지원하는 가장 높은 fps (예: WFOV 1024x1024 는 15fps 까지)."""
-    def fps_set(sensor, w, h):
-        return {p.fps for p in list_profiles(pipeline, sensor) if (w == 0 or p.key == (w, h))}
-
-    want = cres[2] or dres[2]
-    both = fps_set("color", *cres[:2]) & fps_set("depth", *dres[:2])
-    if want and want in both:
-        return want
-    return max(both) if both else 0
+# ---------------------------------------------------------------------------
+# 렌더링
+# ---------------------------------------------------------------------------
 
 
-def start_streams(pipeline, cres: tuple, dres: tuple, use_ir: bool, running: bool = False) -> Session:
-    """스트림 프로파일 선택 → 파이프라인 (재)시작. cres/dres = (w, h, fps), 0 은 기본값."""
-    if running:
-        pipeline.stop()
-    fps = common_fps(pipeline, cres, dres) if (cres[0] or dres[0]) else 0
-    color_p = find_profile(pipeline, "color", cres[0], cres[1], fps if cres[0] else cres[2])
-    depth_p = find_profile(pipeline, "depth", dres[0], dres[1], fps if dres[0] else dres[2])
-    ir_p = None
-    if use_ir:
-        try:
-            # Femto 의 IR 은 depth 와 같은 센서/모드여야 동시 스트리밍 가능
-            ir_p = find_profile(pipeline, "ir", depth_p.get_width(), depth_p.get_height(), depth_p.get_fps())
-        except OBError as e:
-            print(f"IR 프로파일을 찾지 못해 IR 없이 진행합니다: {e}")
+class OrbbecView:
+    """Femto 프레임 → 4 패널. depth 유효 영역 이동평균 등 프레임 간 상태를 들고 있다."""
 
-    config = Config()
-    config.enable_stream(color_p)
-    config.enable_stream(depth_p)
-    if ir_p is not None:
-        config.enable_stream(ir_p)
-    for p, name in ((color_p, "color"), (depth_p, "depth"), (ir_p, "ir")):
-        if p is not None:
-            print(f"  {name:5}: {p.get_width()}x{p.get_height()}@{p.get_fps()} {p.get_format().name}")
+    def __init__(self, cell_w: int, cell_h: int):
+        self.cell_w, self.cell_h = cell_w, cell_h
+        self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
+        self.align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
+        self.reset()
 
-    ci = to_intrinsics(color_p)
-    di = to_intrinsics(depth_p)
-    ii = to_intrinsics(ir_p) if ir_p is not None else di
-    R_dc, t_dc = extrinsic_Rt(depth_p, color_p)  # depth → color
-    R_cd, t_cd = extrinsic_Rt(color_p, depth_p)  # color → depth
-    R_ci, t_ci = extrinsic_Rt(color_p, ir_p) if ir_p is not None else (R_cd, t_cd)
-    print(f"  depth→color baseline t = {np.round(t_dc, 2)} mm")
-    static = {
-        "color": (fov_pinhole(ci), fov_undistorted(ci)),
-        "depth": (fov_pinhole(di), fov_undistorted(di)),
-        "ir": (fov_pinhole(ii), fov_undistorted(ii)),
-    }
+    def reset(self) -> None:
+        self.last = {"color": None, "ir": None, "depth": None}
+        self.valid_score = None  # depth 유효 픽셀 이동평균 (노이즈로 깜빡이는 픽셀 제거)
+        self.hull = None  # 유효 영역 볼록 껍질 (depth 픽셀)
+        self.vfov = None  # 유효 영역 FOV (10프레임마다 갱신)
+        self.frame_i = 0
+        self.cov = {"c": float("nan"), "d": float("nan"), "vc": float("nan")}
+        self.align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)  # 프로파일 캐시 초기화
+
+    def ingest(self, st: Session, frames, do_align: bool) -> bool:
+        """프레임셋에서 영상을 꺼낸다. 켜진 스트림이 다 모였으면 True."""
+        has_color, has_depth = st.color_p is not None, st.depth_p is not None
+        irf = frames.get_ir_frame()
+        cf = frames.get_color_frame() if has_color else None
+        df = frames.get_depth_frame() if has_depth else None
+        if irf is not None:
+            self.last["ir"] = ir_to_u16(irf)
+        if cf is not None:
+            img = color_to_bgr(cf)
+            if img is not None:
+                self.last["color"] = img
+        if df is not None:
+            self.last["depth"] = depth_to_mm(df)
+        self.aligned = None
+        if do_align and cf is not None and df is not None:
+            try:
+                out = self.align.process(frames)
+                if out is not None:
+                    fs = out.as_frame_set() if hasattr(out, "as_frame_set") else out
+                    adf = fs.get_depth_frame()
+                    if adf is not None:
+                        self.aligned = depth_to_mm(adf)
+            except Exception:
+                self.aligned = None
+        return (self.last["ir"] is not None and (not has_color or self.last["color"] is not None)
+                and (not has_depth or self.last["depth"] is not None))
+
+    def auto_distance(self, fallback: float) -> float:
+        depth = self.last["depth"]
+        if depth is None:
+            return fallback
+        h, w = depth.shape
+        c = depth[h // 2 - 10 : h // 2 + 10, w // 2 - 10 : w // 2 + 10]
+        c = c[c > 0]
+        return float(np.median(c)) if c.size else fallback
+
+    def panels(self, st: Session, distance: float, flags: ViewFlags) -> list:
+        ii, ci, di, static, last = st.ii, st.ci, st.di, st.static, self.last
+        has_color, has_depth = st.color_p is not None, st.depth_p is not None
+        cell_w, cell_h = self.cell_w, self.cell_h
+
+        # --- depth 실제 유효 영역 (센서 사각형이 아니라 값이 나오는 영역) ---
+        if has_depth:
+            depth = last["depth"]
+            cur = (depth > 0).astype(np.float32)
+            if self.valid_score is None or self.valid_score.shape != cur.shape:
+                self.valid_score = cur
+            else:
+                cv2.accumulateWeighted(cur, self.valid_score, 0.1)  # 이동평균 (in-place)
+            self.frame_i += 1
+            if self.hull is None or self.frame_i % 10 == 0:  # 무거운 계산은 10프레임마다
+                valid_mask = self.valid_score > 0.2
+                nz = cv2.findNonZero(valid_mask.astype(np.uint8))
+                self.hull = cv2.convexHull(nz).reshape(-1, 2).astype(np.float64) if nz is not None else None
+                self.vfov = valid_region_fov(valid_mask, di)
+        hull = self.hull
+
+        # --- 경계 투영 (원본 픽셀 좌표). IR 이 기준 센서, depth 는 같은 센서 ---
+        i_in_c = c_in_i = c_in_d = v_in_c = None
+        cov_c = cov_d = cov_vc = float("nan")
+        if has_color:
+            i_in_c = project_border(ii, ci, st.R_ic, st.t_ic, distance)
+            c_in_i = project_border(ci, ii, st.R_ci, st.t_ci, distance)
+            cov_c, _ = overlap_ratio(i_in_c, ci.width, ci.height)
+            if has_depth:
+                c_in_d = project_border(ci, di, st.R_cd, st.t_cd, distance)
+                cov_d, _ = overlap_ratio(c_in_d, di.width, di.height)
+                if hull is not None and len(hull) >= 3:
+                    v_in_c = project_between(hull, distance, di, ci, st.R_dc, st.t_dc)
+                    cov_vc, _ = overlap_ratio(v_in_c, ci.width, ci.height)
+        self.cov = {"c": cov_c, "d": cov_d, "vc": cov_vc}
+
+        # 각 패널은 표시 크기로 먼저 줄인 뒤 그린다 (원본 해상도에서 그리면 WFOV/4K 에서 매우 느림)
+        si = viz.fit_scale(ii.width, ii.height, cell_w, cell_h)
+        ir = viz.normalize_ir(viz.shrink(last["ir"], si))
+        if flags.grid:
+            viz.draw_angle_grid(ir, ii.scaled(si))
+        fw, fh = footprint_at_distance(static["ir"][1], distance)
+        ir_lines = [
+            f"IR {ii.width}x{ii.height} ({mode_name('ir', ii.width, ii.height)}) @{st.fps}fps",
+            f"pinhole {static['ir'][0].short()}",
+            f"undist  {static['ir'][1].short()}",
+            f"@{distance:.0f}mm view = {fw:.0f} x {fh:.0f} mm",
+        ]
+        if c_in_i is not None:
+            viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
+            ir_lines.append("magenta: color FOV")
+
+        if has_color:
+            sc = viz.fit_scale(ci.width, ci.height, cell_w, cell_h)
+            color_small = viz.shrink(last["color"], sc)
+            color = color_small.copy()
+            if flags.grid:
+                viz.draw_angle_grid(color, ci.scaled(sc))
+            viz.draw_polygon(color, i_in_c * sc, viz.CYAN, 2)
+            if v_in_c is not None:
+                viz.draw_polygon(color, v_in_c * sc, viz.GREEN, 2)
+            fw, fh = footprint_at_distance(static["color"][1], distance)
+            color_lines = [
+                f"COLOR {ci.width}x{ci.height} ({mode_name('color', ci.width, ci.height)})",
+                f"pinhole {static['color'][0].short()}",
+                f"undist  {static['color'][1].short()}",
+                f"@{distance:.0f}mm view = {fw:.0f} x {fh:.0f} mm",
+                f"cyan : IR/depth sensor FOV, covers {cov_c * 100:.1f}% of color",
+            ]
+            if has_depth:
+                color_lines.append(f"green: depth valid area, covers {cov_vc * 100:.1f}% of color")
+        else:
+            color, color_lines = self.blank, ["COLOR off   (e: menu)"]
+
+        if has_depth:
+            sd = viz.fit_scale(di.width, di.height, cell_w, cell_h)
+            dimg = viz.colorize_depth(viz.shrink(depth, sd, nearest=True))
+            if flags.grid:
+                viz.draw_angle_grid(dimg, di.scaled(sd))
+            if hull is not None:
+                viz.draw_polygon(dimg, hull * sd, viz.GREEN, 1)
+            depth_lines = [
+                f"DEPTH {di.width}x{di.height} ({mode_name('depth', di.width, di.height)})",
+                f"pinhole {static['depth'][0].short()}",
+                f"undist  {static['depth'][1].short()}",
+                f"valid   {self.vfov.short()}",
+            ]
+            if c_in_d is not None:
+                viz.draw_polygon(dimg, c_in_d * sd, viz.MAGENTA, 2)
+                depth_lines.append(f"magenta: color FOV, covers {cov_d * 100:.1f}% of depth")
+        else:
+            dimg, depth_lines = self.blank, ["DEPTH off   (e: menu)"]
+
+        if has_color and has_depth and self.aligned is not None and self.aligned.shape[:2] == last["color"].shape[:2]:
+            small_d = viz.shrink(self.aligned, sc, nearest=True)
+            blend = cv2.addWeighted(color_small, 0.5, viz.colorize_depth(small_d), 0.5, 0)
+            blend_lines = ["Depth aligned to Color (D2C)", f"color pixels with depth: {(small_d > 0).mean() * 100:.1f}%"]
+        elif not (has_color and has_depth):
+            blend, blend_lines = self.blank, ["D2C needs color + depth"]
+        else:
+            blend = np.zeros_like(color)
+            blend_lines = ["D2C align off" if not flags.align else "D2C align unavailable"]
+        return [(ir, ir_lines), (color, color_lines), (dimg, depth_lines), (blend, blend_lines)]
+
+    def snapshot_meta(self, st: Session, distance: float) -> dict:
+        ii, ci, di, static = st.ii, st.ci, st.di, st.static
+        meta = {
+            "distance_mm": distance,
+            "fps": st.fps,
+            "ir": {"res": [ii.width, ii.height], "pinhole": static["ir"][0].as_dict(),
+                   "undistorted": static["ir"][1].as_dict()},
+        }
+        if ci is not None:
+            meta["color"] = {"res": [ci.width, ci.height], "pinhole": static["color"][0].as_dict(),
+                             "undistorted": static["color"][1].as_dict()}
+            meta["ir_covers_color_pct"] = round(self.cov["c"] * 100, 2)
+            meta["ir_to_color_t_mm"] = np.round(st.t_ic, 3).tolist()
+        if di is not None:
+            meta["depth"] = {"res": [di.width, di.height], "pinhole": static["depth"][0].as_dict(),
+                             "undistorted": static["depth"][1].as_dict(), "valid": self.vfov.as_dict()}
+        if ci is not None and di is not None:
+            meta["depth_valid_covers_color_pct"] = round(self.cov["vc"] * 100, 2)
+            meta["color_covers_depth_pct"] = round(self.cov["d"] * 100, 2)
+        return meta
+
+
+class TisView:
+    """DMK 프레임 → IR 패널 하나 (나머지는 비움)."""
+
+    def __init__(self, cell_w: int, cell_h: int):
+        self.cell_w, self.cell_h = cell_w, cell_h
+        self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
+        self.reset()
+
+    def reset(self) -> None:
+        self.last = {"color": None, "ir": None, "depth": None}
+        self.frame = None
+
+    def ingest(self, frame) -> bool:
+        self.frame = frame
+        self.last["ir"] = frame.raw
+        return True
+
+    def panels(self, op: Opened, flags: ViewFlags, fps: float) -> list:
+        f = self.frame
+        src: TisDmkSource = op.source
+        s = viz.fit_scale(f.raw.shape[1], f.raw.shape[0], self.cell_w, self.cell_h)
+        ir = cv2.cvtColor(viz.shrink(f.image, s), cv2.COLOR_GRAY2BGR)
+        exp, gain = src.get_value("Exposure"), src.get_value("Gain")
+        lines = [
+            f"{op.summary.split('  ')[0].replace('name=', '')}",
+            f"{f.mode.pixel_format} {f.mode.res}  set {f.meta.get('fps_set', 0):.1f}fps / actual {fps:.1f}fps",
+            f"exposure {exp * 1000:.2f}ms {'(auto)' if src.get_auto('Exposure') else ''}   gain {gain:.1f}dB {'(auto)' if src.get_auto('Gain') else ''}"
+            if exp is not None and gain is not None else "",
+            f"raw max {int(f.raw.max())} / {np.iinfo(f.raw.dtype).max}",
+        ]
+        if op.intr is not None:
+            if flags.grid:
+                viz.draw_angle_grid(ir, op.intr.scaled(s))
+            lines.append(f"undist  {fov_undistorted(op.intr).short()}  (calib file)")
+        else:
+            lines.append("no calibration: FOV overlay unavailable (calib/dmk_<serial>.json)")
+        na = ["n/a for this device"]
+        return [(ir, lines), (self.blank, na), (self.blank, na), (self.blank, na)]
+
+    def snapshot_meta(self, op: Opened, fps: float) -> dict:
+        f = self.frame
+        src: TisDmkSource = op.source
+        return {"mode": str(f.mode), "fps_set": f.meta.get("fps_set"), "fps_measured": round(fps, 2),
+                "exposure_s": src.get_value("Exposure"), "gain_db": src.get_value("Gain")}
+
+
+# ---------------------------------------------------------------------------
+# 메인
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--serial", default="", help="Orbbec 장치 S/N")
+    ap.add_argument("--ip", default="", help="Orbbec 네트워크 장치 IP (자동 탐색에 안 잡힐 때)")
+    ap.add_argument("--port", type=int, default=DEFAULT_NET_PORT)
+    ap.add_argument("--device", default="", help="장치 이름에 포함된 문자열로 시작 장치 선택 (예: dmk, mega, bolt)")
+    ap.add_argument("--ir", help="IR(=depth) 모드 WxH[@fps] (Femto: 640x576 / 320x288 / 1024x1024 / 512x512)")
+    ap.add_argument("--depth", nargs="?", const="on", help="depth 켜고 시작. 해상도를 주면 --ir 과 같음")
+    ap.add_argument("--color", nargs="?", const="on", help="color 켜고 시작. 해상도 WxH[@fps] 지정 가능")
+    ap.add_argument("--distance", type=float, default=1000.0, help="경계선 투영 거리 mm (기본 1000)")
+    ap.add_argument("--out", type=Path, default=Path("results"), help="스냅샷 저장 폴더")
+    ap.add_argument("--cell", default="800x600", help="패널 하나 크기 WxH")
+    args = ap.parse_args()
+
+    ires = parse_res(args.ir)
+    if args.depth and args.depth != "on":
+        ires = parse_res(args.depth)
+    cres = parse_res(args.color) if args.color and args.color != "on" else (0, 0, 0)
+    target = Target(ires, cres, depth=args.depth is not None, color=args.color is not None)
+
+    cell_w, cell_h = map(int, args.cell.lower().split("x"))
+    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WIN, cell_w * 2, cell_h * 2)
+    show_message(cell_w * 2, cell_h * 2, ["Connecting...", "(device open ~3s + stream start ~2s)"])
+
+    quiet_sdk_log()
+    ctx = Context()
+    choices = find_devices(ctx, args.ip)
+    if not choices:
+        raise SystemExit("장치를 찾을 수 없습니다. USB/네트워크 연결을 확인하거나 (gige_discover.py) --ip 로 지정하세요.")
+    labels = [c.label for c in choices]
+    print("장치:", *labels, sep="\n  ")
+    dev_i = 0
+    if args.serial:
+        dev_i = next((i for i, c in enumerate(choices) if c.entry is not None and c.entry.serial == args.serial), -1)
+        if dev_i < 0:
+            raise SystemExit(f"S/N {args.serial} 장치가 없습니다. 연결된 장치: {', '.join(labels)}")
+    elif args.device:
+        dev_i = next((i for i, l in enumerate(labels) if args.device.lower() in l.lower()), -1)
+        if dev_i < 0:
+            raise SystemExit(f"'{args.device}' 에 맞는 장치가 없습니다. 연결된 장치: {', '.join(labels)}")
+
+    op = open_device(ctx, choices, dev_i, target, args.port)
+    views = {"orbbec": OrbbecView(cell_w, cell_h), "tis": TisView(cell_w, cell_h)}
+    switcher = Switcher()
+    canvas = None
+    menu: MenuState | None = None
+    distance = args.distance
+    flags = ViewFlags()
+    fps_t, fps_n, fps = time.time(), 0, 0.0
+    toast, toast_until = "", 0.0
+
+    def apply_menu(m: MenuState) -> None:
+        nonlocal flags, toast, toast_until
+        if m.changed("dev"):
+            new_i = m.get("dev")
+            old_pipe, old_src = op.pipeline, op.source
+            op.pipeline = op.source = None  # 닫히는 중 표시 (실패 시 이전 장치 다시 열기)
+
+            def job():
+                if old_pipe is not None:
+                    old_pipe.stop()
+                if old_src is not None:
+                    old_src.close()
+                return open_device(ctx, choices, new_i, target, args.port)
+
+            switcher.start(job, f"Opening {labels[new_i]}")
+            return
+        if op.kind == "orbbec":
+            new_t, flags = orbbec_menu_result(m, op)
+            if new_t != op.st.target:
+                switcher.start(lambda p=op.pipeline, t=new_t: start_streams(p, t, running=True),
+                               f"Switching to {describe(new_t)}")
+        else:
+            src: TisDmkSource = op.source
+            if m.has("grid"):
+                flags = replace(flags, grid=bool(m.get("grid")))
+            if m.changed("exp_auto") and m.get("exp_auto"):
+                src.set_auto("Exposure", True)
+            elif m.changed("exp") or (m.changed("exp_auto") and not m.get("exp_auto")):
+                src.set_value("Exposure", EXPOSURE_MS[m.get("exp")] / 1000.0)
+            if m.changed("gain_auto") and m.get("gain_auto"):
+                src.set_auto("Gain", True)
+            elif m.changed("gain") or (m.changed("gain_auto") and not m.get("gain_auto")):
+                src.set_value("Gain", float(GAIN_DB[m.get("gain")]))
+            if m.changed("mode"):
+                mode = op.modes[m.get("mode")]
+
+                def job(mode=mode):
+                    src.stop()
+                    src.start(mode)
+                    op.intr = src.intrinsics(mode)
+                    return "restarted"
+
+                switcher.start(job, f"Switching to {mode}")
+
     try:
-        pipeline.enable_frame_sync()
-    except Exception:
-        pass
-    pipeline.start(config)
-    return Session(color_p, depth_p, ir_p, depth_p.get_fps(), ci, di, ii,
-                   R_dc, t_dc, R_cd, t_cd, R_ci, t_ci, static)
+        while True:
+            # --- 재시작 / 장치 전환 처리 (드라이버 때문에 수 초 걸려 백그라운드에서) ---
+            if switcher.busy:
+                show_message(cell_w * 2, cell_h * 2,
+                             [f"{switcher.label}  ({time.time() - switcher.started:.1f}s)",
+                              "camera driver needs a few seconds to restart streams", "q: quit"], base=canvas)
+                k = cv2.waitKeyEx(30)
+                if k != -1 and (k & 0xFF) in (ord("q"), KEY_ESC):
+                    switcher.join()
+                    break
+                continue
+            if switcher.result is not None:
+                res, err = switcher.take_result()
+                if err is not None:
+                    print(f"전환 실패: {err}")
+                    toast = f"failed: {str(err)[:70]}"
+                    if op.pipeline is None and op.source is None:  # 장치 전환 중 실패 → 이전 장치 다시 열기
+                        op = open_device(ctx, choices, op.dev, target, args.port)
+                elif isinstance(res, Opened):
+                    op = res
+                    toast = f"{labels[op.dev]}  ({time.time() - switcher.started:.1f}s)"
+                elif isinstance(res, Session):
+                    op.st = res
+                    toast = f"{describe(op.st.target)} @ {op.st.fps}fps  ({time.time() - switcher.started:.1f}s)"
+                else:
+                    toast = f"{op.source.mode}  ({time.time() - switcher.started:.1f}s)"
+                toast_until = time.time() + 3
+                views[op.kind].reset()
+                fps_t, fps_n, fps = time.time(), 0, 0.0
 
+            view = views[op.kind]
+            if op.kind == "orbbec":
+                frames = op.pipeline.wait_for_frames(1000)
+                ready = frames is not None and view.ingest(op.st, frames, flags.align)
+            else:
+                frame = op.source.read(1500)
+                ready = frame is not None and view.ingest(frame)
+            if not ready:
+                k = cv2.waitKeyEx(1)
+                if k != -1 and (k & 0xFF) in (ord("q"), KEY_ESC) and menu is None:
+                    break
+                continue
 
-def _key_loop() -> str | None:
-    k = cv2.waitKey(1) & 0xFF
-    return "quit" if k in (ord("q"), 27) else None
+            fps_n += 1
+            if time.time() - fps_t >= 1.0:
+                fps, fps_n, fps_t = fps_n / (time.time() - fps_t), 0, time.time()
+            if op.kind == "orbbec":
+                if flags.auto:
+                    distance = view.auto_distance(distance)
+                panels = view.panels(op.st, distance, flags)
+                footer = f"Z={distance:.0f}mm {'(auto)' if flags.auto else ''}  {fps:.1f}fps   "
+            else:
+                panels = view.panels(op, flags, fps)
+                footer = f"{fps:.1f}fps   "
+            canvas = viz.grid(panels, 2, cell_w, cell_h)
+            viz.put_text(canvas, footer + "e menu   +/- [ ] distance   s save   q quit",
+                         (10, canvas.shape[0] - 10), 0.5, viz.YELLOW)
+            if time.time() < toast_until:
+                viz.put_text(canvas, toast, (10, canvas.shape[0] - 40), 0.7, viz.YELLOW)
+            if menu is not None:
+                draw_menu(canvas, menu)
+            cv2.imshow(WIN, canvas)
+
+            k = cv2.waitKeyEx(1)
+            if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if k == -1:
+                continue
+            ch = k & 0xFF if k < 0x10000 else -1
+
+            if menu is not None:  # --- 메뉴 열린 상태 ---
+                if k in KEY_UP or ch == ord("w"):
+                    menu.move(-1)
+                elif k in KEY_DOWN or ch == ord("s"):
+                    menu.move(1)
+                elif k in KEY_LEFT or ch == ord("a"):
+                    menu.adjust(-1)
+                elif k in KEY_RIGHT or ch == ord("d"):
+                    menu.adjust(1)
+                elif ch in (KEY_ESC, ord("e")):
+                    menu = None
+                elif ch in KEY_ENTER:
+                    apply_menu(menu)
+                    menu = None
+                continue
+
+            # --- 일반 키 ---
+            if ch in (ord("q"), KEY_ESC):
+                break
+            if ch == ord("e"):
+                menu = (build_orbbec_menu(labels, op, op.st.target, flags) if op.kind == "orbbec"
+                        else build_tis_menu(labels, op, flags))
+            elif ch in (ord("+"), ord("=")):
+                distance += 100
+            elif ch == ord("-"):
+                distance = max(100, distance - 100)
+            elif ch == ord("]"):
+                distance += 1000
+            elif ch == ord("["):
+                distance = max(100, distance - 1000)
+            elif ch == ord("s"):
+                meta = {"device": op.summary}
+                meta.update(view.snapshot_meta(op.st, distance) if op.kind == "orbbec" else view.snapshot_meta(op, fps))
+                save_snapshot(args.out, canvas, view.last, meta)
+    finally:
+        switcher.join()
+        if switcher.result is not None and isinstance(switcher.result[0], Opened):
+            op = switcher.result[0]  # 장치 전환 중 종료 → 새로 열린 쪽을 닫는다
+        op.close()
+        cv2.destroyAllWindows()
 
 
 def save_snapshot(out: Path, canvas: np.ndarray, last: dict, meta: dict) -> None:
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     cv2.imwrite(str(out / f"viewer_{stamp}.png"), canvas)
-    cv2.imwrite(str(out / f"viewer_{stamp}_color.png"), last["color"])
-    np.save(out / f"viewer_{stamp}_depth_mm.npy", last["depth"])
-    if last["ir"] is not None:
-        cv2.imwrite(str(out / f"viewer_{stamp}_ir16.png"), last["ir"])
+    cv2.imwrite(str(out / f"viewer_{stamp}_ir{last['ir'].dtype.itemsize * 8}.png"), last["ir"])
+    if last["color"] is not None:
+        cv2.imwrite(str(out / f"viewer_{stamp}_color.png"), last["color"])
+    if last["depth"] is not None:
+        np.save(out / f"viewer_{stamp}_depth_mm.npy", last["depth"])
     (out / f"viewer_{stamp}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"스냅샷 저장: {out / f'viewer_{stamp}'}.*")
 
