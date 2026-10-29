@@ -113,14 +113,34 @@ Orbbec Femto Bolt / Femto Mega 의 color, IR, depth 스트림 화각을 세 가�
 .\.venv\Scripts\python fov_measure.py manual --live --stream ir --depth 640x576
 ```
 
+## IR 인식 비교 (작업 중)
+
+IR 카메라(Femto Bolt / Femto Mega / DMK 33GX264)로 AprilTag·문양·도형 인식을 비교하는 도구. 현재는 카메라 모드 확인까지.
+
+```powershell
+.\.venv\Scripts\python list_modes.py                         # 연결된 Orbbec 장치 전부의 IR 모드
+.\.venv\Scripts\python list_modes.py --ip 192.168.1.10       # Femto Mega 이더넷
+.\.venv\Scripts\python list_modes.py --probe --out results   # 모드마다 실제로 열어 첫 프레임 시간·실측 fps·포화율 저장
+```
+
+Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (WFOV) 각각 30·25·15·5fps (1024x1024 는 15·5fps), 그리고 **Passive IR** 1024x1024 15·5fps. 모두 Y16, depth 없이 IR 만 단독으로 켠다.
+
+- **Passive IR** = Femto 자체 IR 조명을 끈 모드 (`OB_PROP_SWITCH_IR_MODE_INT=1`). 외부 IR 조명이 없으면 거의 검게 나온다 (실내 median 0).
+- 1024x1024 외의 해상도에서 패시브로 두면 IR 이 아닌 depth 같은 값이 나와 모드 목록에서 뺐다.
+- 같은 1024x1024 에서 액티브 ↔ 패시브를 바로 바꾸면 SDK 가 이전 모드를 유지한다 (프레임 없음 / 전부 0). 소스가 다른 해상도를 잠깐 열었다 닫아 자동으로 풀어 주며, 그만큼 전환이 ~1.3초 더 걸린다.
+
 ## 구조
 
 ```
 femto_fov/
   fov_math.py   FOV 계산, 왜곡 보정(Brown-Conrady K6 / Kannala-Brandt), 스트림 간 투영, 체커보드 초점 추정 — SDK 비의존
-  device.py     pyorbbecsdk 래퍼 (프로파일 열거, 내부/외부 파라미터, 프레임 변환)
+  device.py     pyorbbecsdk 래퍼 (장치 선택, 프로파일 열거, 내부/외부 파라미터, 프레임 변환)
   viz.py        컬러맵, 경계/각도 격자 오버레이, 패널 배치
-  specs.py      데이터시트 공칭 FOV (비교 기준, 필요 시 수정)
+  specs.py      데이터시트 공칭 FOV, Femto depth 모드 이름 (비교 기준, 필요 시 수정)
+ir_detect/
+  sources/      카메라 소스 공통 인터페이스 (base.py), Femto Bolt / Mega IR (orbbec_ir.py)
+  preprocess.py 센서 원본 → 8비트 변환
+list_modes.py   카메라별 IR 모드 목록 / 실측
 tests/          단위 테스트 (장치 불필요): .\.venv\Scripts\python -m pytest
 results/        출력 (gitignore)
 ```

@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from .fov_math import Intrinsics
+from .specs import FEMTO_DEPTH_MODES
 
 # cp949 콘솔/파이프에서 특수문자(°, × 등) 출력 시 죽지 않도록
 for _s in (sys.stdout, sys.stderr):
@@ -22,6 +23,7 @@ try:
         AlignFilter,
         Config,
         Context,
+        Device,
         OBError,
         OBFormat,
         OBLogLevel,
@@ -42,13 +44,15 @@ SENSORS = {
     "ir": OBSensorType.IR_SENSOR,
 }
 
-# Femto Bolt / Femto Mega (Azure Kinect 호환) depth 모드 이름. 해상도로 모드가 결정된다.
-FEMTO_DEPTH_MODES = {
-    (320, 288): "NFOV 2x2 binned",
-    (640, 576): "NFOV unbinned",
-    (512, 512): "WFOV 2x2 binned",
-    (1024, 1024): "WFOV unbinned",
-}
+# Femto Mega 네트워크 장치 기본 포트
+DEFAULT_NET_PORT = 8090
+
+OPEN_HINT = (
+    "장치를 열 수 없습니다 (Windows: 액세스 거부 0x80070005 등).\n"
+    "  - OrbbecViewer / k4aviewer / 다른 스크립트가 카메라를 쓰고 있지 않은지 확인\n"
+    "  - 설정 > 개인정보 > 카메라 > '데스크톱 앱이 카메라에 액세스하도록 허용' 켜기\n"
+    "  - USB 를 다시 꽂고 재시도"
+)
 
 
 def mode_name(sensor: str, width: int, height: int) -> str:
@@ -100,14 +104,48 @@ def open_pipeline() -> Pipeline:
     try:
         return Pipeline()
     except (OBError, UnicodeDecodeError, RuntimeError) as e:
-        print(
-            "장치를 열 수 없습니다 (Windows: 액세스 거부 0x80070005 등).\n"
-            "  - OrbbecViewer / k4aviewer / 다른 스크립트가 카메라를 쓰고 있지 않은지 확인\n"
-            "  - 설정 > 개인정보 > 카메라 > '데스크톱 앱이 카메라에 액세스하도록 허용' 켜기\n"
-            "  - USB 를 다시 꽂고 재시도\n"
-            f"  (원본 오류: {type(e).__name__}: {e})"
-        )
+        print(f"{OPEN_HINT}\n  (원본 오류: {type(e).__name__}: {e})")
         sys.exit(1)
+
+
+@dataclass
+class DeviceEntry:
+    name: str
+    serial: str
+    connection: str  # "USB3.1", "Ethernet" 등 SDK 문자열 그대로
+    ip: str = ""
+
+
+def enumerate_devices(ctx: Context) -> list[DeviceEntry]:
+    """연결된 Orbbec 장치 목록 (USB + 자동 탐색된 네트워크 장치)."""
+    dl = ctx.query_devices()
+    out = []
+    for i in range(dl.get_count()):
+        conn = dl.get_device_connection_type_by_index(i)
+        ip = ""
+        if not conn.upper().startswith("USB"):
+            try:
+                ip = dl.get_device_ip_address_by_index(i)
+            except OBError:
+                pass
+        out.append(DeviceEntry(dl.get_device_name_by_index(i), dl.get_device_serial_number_by_index(i), conn, ip))
+    return out
+
+
+def get_device(ctx: Context, serial: str = "", ip: str = "", port: int = DEFAULT_NET_PORT) -> Device:
+    """ip 가 있으면 네트워크 장치(Femto Mega 이더넷), 아니면 serial 로, 둘 다 없으면 첫 번째 장치.
+    ctx 가 사라지면 장치도 무효가 되므로 호출자가 ctx 를 들고 있어야 한다."""
+    if ip:
+        return ctx.create_net_device(ip, port)
+    dl = ctx.query_devices()
+    if dl.get_count() == 0:
+        raise LookupError("장치를 찾을 수 없습니다. 카메라를 USB 3 포트에 연결했는지 확인하세요.")
+    if not serial:
+        return dl.get_device_by_index(0)
+    serials = [dl.get_device_serial_number_by_index(i) for i in range(dl.get_count())]
+    if serial not in serials:
+        raise LookupError(f"S/N {serial} 장치가 없습니다. 연결된 장치: {', '.join(serials)}")
+    return dl.get_device_by_serial_number(serial)
 
 
 def device_summary(pipeline: Pipeline) -> str:
@@ -234,7 +272,10 @@ def ir_to_u16(frame) -> np.ndarray:
 __all__ = [
     "AlignFilter",
     "Config",
+    "DEFAULT_NET_PORT",
+    "DeviceEntry",
     "OBError",
+    "OPEN_HINT",
     "OBStreamType",
     "Pipeline",
     "SENSORS",
@@ -242,6 +283,8 @@ __all__ = [
     "color_to_bgr",
     "depth_to_mm",
     "device_summary",
+    "enumerate_devices",
+    "get_device",
     "extrinsic_Rt",
     "find_profile",
     "ir_to_u16",
