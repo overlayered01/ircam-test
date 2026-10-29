@@ -771,7 +771,8 @@ class TisView:
             f"{f.mode.pixel_format} {f.mode.res}  set {f.meta.get('fps_set', 0):.1f}fps / actual {fps:.1f}fps",
             f"exposure {exp * 1000:.2f}ms {'(auto)' if src.get_auto('Exposure') else ''}   gain {gain:.1f}dB {'(auto)' if src.get_auto('Gain') else ''}"
             if exp is not None and gain is not None else "",
-            f"raw max {int(f.raw.max())} / {np.iinfo(f.raw.dtype).max}",
+            f"raw max {int(f.raw.max())} / {np.iinfo(f.raw.dtype).max}   sat {(f.image >= 250).mean() * 100:.1f}%"
+            f"   focus {cv2.Laplacian(viz.shrink(f.image, s), cv2.CV_64F).var():.0f} (higher = sharper)",
         ]
         if op.intr is not None:
             if flags.grid:
