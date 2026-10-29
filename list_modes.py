@@ -1,7 +1,8 @@
 """카메라별 IR 모드 전체 목록. --probe 로 각 모드를 실제로 열어 동작 여부·첫 프레임 시간·실측 fps 확인.
 
-    python list_modes.py                         # 연결된 Orbbec 장치 전부 (Femto Bolt / Mega USB)
-    python list_modes.py --serial CL8764100GL    # 특정 장치
+    python list_modes.py                         # 연결된 장치 전부 (Femto Bolt / Mega, DMK 33GX264)
+    python list_modes.py --source orbbec         # Orbbec 만 / --source tis: The Imaging Source 만
+    python list_modes.py --serial CL8764100GL    # 특정 Orbbec 장치
     python list_modes.py --ip 192.168.1.10       # Femto Mega 이더넷
     python list_modes.py --probe --out results   # 모드별 실측 후 results/modes_*.csv, .json 저장
 """
@@ -22,11 +23,14 @@ import numpy as np
 from femto_fov.fov_math import fov_undistorted
 from ir_detect.sources import CameraSource, Mode, SourceUnavailable
 from ir_detect.sources.orbbec_ir import OrbbecIRSource
+from ir_detect.sources.tis_dmk import TisDmkSource
+
+SOURCES = {"orbbec": OrbbecIRSource, "tis": TisDmkSource}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["orbbec"], default="orbbec")
+    ap.add_argument("--source", choices=["all", *SOURCES], default="all")
     ap.add_argument("--serial", default="", help="장치 S/N (생략하면 연결된 장치 전부)")
     ap.add_argument("--ip", default="", help="네트워크 장치 IP (Femto Mega 이더넷)")
     ap.add_argument("--port", type=int, default=0, help="네트워크 장치 포트 (기본 8090)")
@@ -35,15 +39,22 @@ def main() -> None:
     ap.add_argument("--out", type=Path, help="CSV/JSON 저장 폴더")
     args = ap.parse_args()
 
-    ok, why = OrbbecIRSource.available()
-    if not ok:
-        sys.exit(why)
     if args.serial or args.ip:
+        ok, why = OrbbecIRSource.available()
+        if not ok:
+            sys.exit(why)
         sources: list[CameraSource] = [OrbbecIRSource("Femto", args.serial, args.ip, args.port)]
     else:
-        sources = OrbbecIRSource.discover()
+        kinds = list(SOURCES) if args.source == "all" else [args.source]
+        sources = []
+        for k in kinds:
+            ok, why = SOURCES[k].available()
+            if not ok:
+                print(f"[{k}] {why}")
+                continue
+            sources += SOURCES[k].discover()
         if not sources:
-            sys.exit("Orbbec 장치를 찾을 수 없습니다. USB 연결을 확인하거나 --ip 로 네트워크 장치를 지정하세요.")
+            sys.exit("장치를 찾을 수 없습니다. USB/네트워크 연결을 확인하거나 (gige_discover.py) --ip 로 지정하세요.")
 
     for src in sources:
         try:
