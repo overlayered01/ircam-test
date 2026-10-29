@@ -2,4 +2,5 @@
 pyorbbecsdk2>=2.1
 opencv-python>=4.8
 numpy>=2.1
+pupil-apriltags   # AprilTag 3 검출기 (check_tags.py / tests 교차 검증, 선택)
 pytest
