@@ -911,6 +911,9 @@ def main() -> None:
     ap.add_argument("--distance", type=float, default=1000.0, help="경계선 투영 거리 mm (기본 1000)")
     ap.add_argument("--out", type=Path, default=Path("results"), help="스냅샷 저장 폴더")
     ap.add_argument("--cell", default="800x600", help="패널 하나 크기 WxH")
+    ap.add_argument("--detect", default="off", choices=DETECT_OPTS, help="시작 시 인식 모드")
+    ap.add_argument("--family", default="tag36h11", choices=det.FAMILIES, help="AprilTag 계열")
+    ap.add_argument("--invert", action="store_true", help="검출 전 영상 반전")
     args = ap.parse_args()
 
     ires = parse_res(args.ir)
@@ -950,7 +953,7 @@ def main() -> None:
     canvas = None
     menu: MenuState | None = None
     distance = args.distance
-    flags = ViewFlags()
+    flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 
