@@ -145,10 +145,14 @@ class MenuRow:
     label: str
     options: list  # 표시 문자열 목록
     index: int = 0
+    group: str = "camera"  # 패널: "camera" (왼쪽) / "detect" (오른쪽)
 
     @property
     def value(self) -> str:
         return self.options[self.index]
+
+
+PANELS = (("camera", "Camera"), ("detect", "Detection"))
 
 
 class MenuState:
@@ -205,14 +209,15 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
     types = list(det.SHAPE_TYPES)
     tols = [f"{int(t * 100)}%" for t in det.SHAPE_TOLS]
     mins = [str(v) for v in det.SHAPE_MIN_PX]
+    g = "detect"
     return [
-        MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect)),
-        MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0),
-        MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert)),
-        MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0),
-        MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular)),
-        MenuRow("stol", "Shape tolerance", tols, _nearest(list(det.SHAPE_TOLS), flags.shape_tol)),
-        MenuRow("smin", "Shape min px", mins, _nearest(list(det.SHAPE_MIN_PX), flags.shape_min)),
+        MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect), g),
+        MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0, g),
+        MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
+        MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
+        MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular), g),
+        MenuRow("stol", "Shape tolerance", tols, _nearest(list(det.SHAPE_TOLS), flags.shape_tol), g),
+        MenuRow("smin", "Shape min px", mins, _nearest(list(det.SHAPE_MIN_PX), flags.shape_min), g),
     ]
 
 
@@ -304,11 +309,9 @@ def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuSta
 
 @dataclass
 class MenuLayout:
-    """draw_menu 가 그린 위치. 마우스 클릭을 항목/화살표/버튼에 대응시킨다."""
+    """draw_menu 가 그린 위치. 마우스 클릭을 항목/화살표/버튼에 대응시킨다. rows 순서 = MenuState 의 행 순서."""
 
-    rows: list[tuple[int, int, int, int]]  # 행마다 (x0, y0, x1, y1)
-    left: tuple[int, int]  # '<' 영역 x 범위
-    right: tuple[int, int]  # '>' 영역 x 범위
+    rows: list[tuple[tuple[int, int, int, int], int, int]]  # 행마다 (행 사각형, '<' 오른끝 x, '>' 왼끝 x)
     apply: tuple[int, int, int, int]
     close: tuple[int, int, int, int]
 
@@ -317,42 +320,70 @@ class MenuLayout:
         return r[0] <= x <= r[2] and r[1] <= y <= r[3]
 
     def row_at(self, x: int, y: int) -> int:
-        return next((i for i, r in enumerate(self.rows) if self.inside(r, x, y)), -1)
+        return next((i for i, (r, _, _) in enumerate(self.rows) if self.inside(r, x, y)), -1)
+
+    def arrow(self, i: int, x: int) -> int:
+        """행 i 안의 x 가 어느 쪽인지: -1 '<', +1 '>' 또는 값 글자, 0 라벨."""
+        r, left_end, right_start = self.rows[i]
+        if x >= right_start:
+            return 1
+        if x <= left_end:
+            return -1 if x > left_end - 34 else 0
+        return 1
 
 
 ROW_H = 32
+PANEL_GAP = 16
 
 
 def draw_menu(canvas: np.ndarray, menu: MenuState) -> MenuLayout:
-    rows = menu.rows()
+    """패널 두 개: 왼쪽 Camera (장치·스트림·표시), 오른쪽 Detection (태그·도형). 행 순서는 MenuState 그대로."""
+    rows = menu._rows
     label_w = 170
-    value_w = max(300, max(len(v) for _, v in rows) * 11 + 80)
-    w, h = label_w + value_w + 40, ROW_H * (len(rows) + 2) + 24
+    panels = []  # (group, title, [행 인덱스…], 폭)
+    for group, title in PANELS:
+        idx = [i for i, r in enumerate(rows) if r.group == group]
+        if not idx:
+            continue
+        value_w = max(220, max(len(rows[i].value) for i in idx) * 11 + 80)
+        panels.append((group, title, idx, label_w + value_w + 40))
+    n_max = max(len(p[2]) for p in panels)
+    h = ROW_H * (n_max + 1) + 24
     x0, y0 = 30, 30
-    box = canvas[y0 : y0 + h, x0 : x0 + w]
-    box[:] = (box * 0.25).astype(np.uint8)
-    cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), viz.YELLOW, 1)
-    vx = x0 + label_w  # 값 영역 시작
-    rects = []
-    for i, (label, value) in enumerate(rows):
-        y = y0 + ROW_H * (i + 1)
-        r = (x0 + 6, y - 22, x0 + w - 6, y + 8)
-        rects.append(r)
-        color = viz.YELLOW if i == menu.sel else viz.WHITE
-        if i == menu.sel:
-            cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), (60, 60, 60), -1)
-        viz.put_text(canvas, label, (x0 + 16, y), 0.6, color)
-        viz.put_text(canvas, "<", (vx, y), 0.6, color)
-        viz.put_text(canvas, value, (vx + 28, y), 0.6, color)
-        viz.put_text(canvas, ">", (x0 + w - 34, y), 0.6, color)
-    by = y0 + h - 14
-    apply = (x0 + w - 230, by - 22, x0 + w - 130, by + 6)
-    close = (x0 + w - 110, by - 22, x0 + w - 20, by + 6)
+    total_w = sum(p[3] for p in panels) + PANEL_GAP * (len(panels) - 1)
+    layout_rows: dict[int, tuple] = {}
+    px = x0
+    for group, title, idx, w in panels:
+        box = canvas[y0 : y0 + h, px : px + w]
+        box[:] = (box * 0.25).astype(np.uint8)
+        cv2.rectangle(canvas, (px, y0), (px + w, y0 + h), viz.YELLOW, 1)
+        viz.put_text(canvas, title, (px + 16, y0 + 24), 0.65, viz.CYAN)
+        vx = px + label_w  # 값 영역 시작
+        for k, i in enumerate(idx):
+            y = y0 + ROW_H * (k + 2)
+            r = (px + 6, y - 22, px + w - 6, y + 8)
+            color = viz.YELLOW if i == menu.sel else viz.WHITE
+            if i == menu.sel:
+                cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), (60, 60, 60), -1)
+            viz.put_text(canvas, rows[i].label, (px + 16, y), 0.6, color)
+            viz.put_text(canvas, "<", (vx, y), 0.6, color)
+            viz.put_text(canvas, rows[i].value, (vx + 28, y), 0.6, color)
+            viz.put_text(canvas, ">", (px + w - 34, y), 0.6, color)
+            layout_rows[i] = (r, vx + 24, px + w - 44)
+        px += w + PANEL_GAP
+    # 아래 바: 안내 + Apply / Close
+    by0, by1 = y0 + h + 8, y0 + h + 44
+    bar = canvas[by0:by1, x0 : x0 + total_w]
+    bar[:] = (bar * 0.25).astype(np.uint8)
+    cv2.rectangle(canvas, (x0, by0), (x0 + total_w, by1), viz.YELLOW, 1)
+    apply = (x0 + total_w - 220, by0 + 6, x0 + total_w - 124, by1 - 6)
+    close = (x0 + total_w - 108, by0 + 6, x0 + total_w - 12, by1 - 6)
     for r, text in ((apply, "Apply"), (close, "Close")):
         cv2.rectangle(canvas, (r[0], r[1]), (r[2], r[3]), viz.YELLOW, 1)
         viz.put_text(canvas, text, (r[0] + 14, r[3] - 8), 0.55, viz.YELLOW)
-    viz.put_text(canvas, "arrows/wheel/click: change   Enter: apply   Esc: close", (x0 + 16, by), 0.45, viz.YELLOW)
-    return MenuLayout(rects, (vx - 10, vx + 24), (x0 + w - 44, x0 + w - 6), apply, close)
+    viz.put_text(canvas, "up/down or click: select   left/right, < >, wheel: change   Enter: apply   Esc: close",
+                 (x0 + 12, by1 - 12), 0.45, viz.YELLOW)
+    return MenuLayout([layout_rows[i] for i in range(len(rows))], apply, close)
 
 
 def draw_menu_button(canvas: np.ndarray) -> tuple[int, int, int, int]:
@@ -1055,12 +1086,9 @@ def main() -> None:
                         menu = None
                     elif row >= 0:
                         menu.sel = row
-                        if menu_layout.left[0] <= mx <= menu_layout.left[1]:
-                            menu.adjust(-1)
-                        elif mx >= menu_layout.right[0]:
-                            menu.adjust(1)
-                        elif mx > menu_layout.left[1]:
-                            menu.adjust(1)  # 값 글자 클릭 = 다음 값
+                        d = menu_layout.arrow(row, mx)  # '<' = -1, '>' 또는 값 글자 = +1, 라벨 = 0
+                        if d:
+                            menu.adjust(d)
                 elif e == cv2.EVENT_MOUSEWHEEL and row >= 0:
                     menu.sel = row
                     delta = (mf >> 16) & 0xFFFF  # 휠 방향은 flags 상위 16비트 (signed)

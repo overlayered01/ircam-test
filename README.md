@@ -63,7 +63,7 @@ DMK 는 IR 패널 하나만 쓰고(depth/color 없음) 메뉴에 모드·노출�
 
 | 키 | 동작 |
 |---|---|
-| `e` 또는 하단 `MENU` 버튼 | 설정 메뉴. Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. 공통: Detect / Tag family / Invert image / 도형 조건. 키보드 `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기. 마우스: 행 클릭 선택, `<` `>` 클릭·휠로 값, `Apply` / `Close` 버튼 |
+| `e` 또는 하단 `MENU` 버튼 | 설정 메뉴 (왼쪽 Camera / 오른쪽 Detection 패널). Orbbec: 장치 / IR 모드 / fps / depth on-off / color on-off / color 해상도 / 각도 격자 / D2C 정렬 / 자동 거리. DMK: 장치 / 모드 / 노출 auto·값 / 게인 auto·값. 공통: Detect / Tag family / Invert image / 도형 조건. 키보드 `↑↓` 항목, `←→` 값, `Enter` 적용, `Esc` 닫기. 마우스: 행 클릭 선택, `<` `>` 클릭·휠로 값, `Apply` / `Close` 버튼 |
 | `+/-`, `[ ]` | 경계선 투영 거리 ±100mm / ±1000mm |
 | `s` | 스냅샷 (PNG + 켜진 스트림의 depth npy / color PNG + JSON) 저장 |
 | `q` / `ESC` | 종료 |
