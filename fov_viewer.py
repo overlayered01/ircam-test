@@ -118,6 +118,7 @@ class ViewFlags:
     shape_tol: float = 0.1  # 정형 허용 편차
     shape_min: int = 20  # 최소 크기 (원본 픽셀)
     shape_mode: str = "both"  # det.SHAPE_MODES: filled / outline / both
+    detect_width: int = 1280  # 검출용 축소 폭 (0 = 원본 그대로). DMK 2448px 에서 작은 도형은 full 로
 
     @property
     def tags(self) -> bool:
@@ -133,6 +134,8 @@ class ViewFlags:
 
 
 DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
+DETECT_WIDTHS = ["640", "1280", "full"]  # 검출용 축소 폭
+DETECT_WIDTH_VALUES = (640, 1280, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +217,7 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
     g = "detect"
     return [
         MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect), g),
+        MenuRow("dwidth", "Detect width", DETECT_WIDTHS, _nearest(list(DETECT_WIDTH_VALUES), flags.detect_width), g),
         MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0, g),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
@@ -228,6 +232,7 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
     return replace(
         flags,
         detect=m.row("detect").value,
+        detect_width=DETECT_WIDTH_VALUES[m.get("dwidth")],
         family=m.row("family").value,
         invert=bool(m.get("invert")),
         shape_type=m.row("stype").value,
@@ -749,6 +754,7 @@ class OrbbecView:
             viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
             ir_lines.append("magenta: color FOV")
         if flags.detect != "off":
+            self.detp.max_width = flags.detect_width or 10**9
             self.det = self.detp.run(to_u8(last["ir"]), flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
             det.draw(ir, self.det, si)
             ir_lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
@@ -883,6 +889,7 @@ class TisView:
         else:
             lines.append("no calibration: FOV overlay unavailable (calib/dmk_<serial>.json)")
         if flags.detect != "off":
+            self.detp.max_width = flags.detect_width or 10**9
             self.det = self.detp.run(f.image, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
             det.draw(ir, self.det, s)
             lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
@@ -918,6 +925,8 @@ def main() -> None:
     ap.add_argument("--detect", default="off", choices=DETECT_OPTS, help="시작 시 인식 모드")
     ap.add_argument("--family", default="tag36h11", choices=det.FAMILIES, help="AprilTag 계열")
     ap.add_argument("--invert", action="store_true", help="검출 전 영상 반전")
+    ap.add_argument("--detect-width", type=int, default=1280, choices=DETECT_WIDTH_VALUES,
+                    help="검출용 축소 폭 (0 = 원본). DMK 에서 작은 도형은 0")
     args = ap.parse_args()
 
     ires = parse_res(args.ir)
@@ -957,7 +966,7 @@ def main() -> None:
     canvas = None
     menu: MenuState | None = None
     distance = args.distance
-    flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert)
+    flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 

@@ -67,9 +67,11 @@ def make_sheet(size_mm: float, stroke_mm: float, dpi: int, title: str) -> np.nda
         cy = int(20 * px) + cell_h * (i // cols) + cell_h // 2 - int(8 * px)
         draw_shape(img, name, (cx, cy), size_px, stroke)
         label = f"{name}  {size_mm:.0f} mm"
-        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.6, 3)
-        cv2.putText(img, label, (cx - tw // 2, cy + size_px // 2 + int(12 * px)), cv2.FONT_HERSHEY_SIMPLEX, 1.6, 0, 3, cv2.LINE_AA)
-    cv2.putText(img, title, (int(10 * px), int(14 * px)), cv2.FONT_HERSHEY_SIMPLEX, 1.4, 0, 3, cv2.LINE_AA)
+        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+        # 라벨은 도형에서 도형 크기의 절반 이상 떨어뜨린다: 멀리서 작게 보일 때 글자가 도형에 붙으면 한 덩어리로 잡힌다
+        cv2.putText(img, label, (cx - tw // 2, cy + size_px // 2 + max(int(20 * px), size_px // 2)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, 0, 2, cv2.LINE_AA)
+    cv2.putText(img, title, (int(10 * px), int(10 * px)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, 0, 2, cv2.LINE_AA)
     return img
 
 

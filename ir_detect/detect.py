@@ -186,11 +186,29 @@ def _convex_flags(poly: np.ndarray) -> np.ndarray:
 
 
 def classify(contour: np.ndarray, epsilon: float = 0.02) -> tuple[str, float, np.ndarray] | None:
-    """외곽선 → (이름, 정형 편차, 근사 다각형). 해당 없으면 None."""
+    """외곽선 → (이름, 정형 편차, 근사 다각형). 해당 없으면 None.
+
+    둘레 비율 epsilon 으로 꼭짓점을 잡는다. 작은 도형(20px 안팎)은 모서리가 뭉개져 꼭짓점이 남거나(사각형 → 육각형)
+    잘린다(삼각형 꼭대기 → 사다리꼴). 그래서 첫 해석이 없거나 편차가 15% 를 넘으면 2배·3배 epsilon 으로도 보고
+    편차가 가장 작은 해석을 고른다. 깨끗한 원이 거친 근사에서 육각형으로 둔갑하지 않게 좋은 해석은 그대로 둔다.
+    """
     peri = cv2.arcLength(contour, True)
     area = cv2.contourArea(contour)
     if peri <= 0 or area <= 0:
         return None
+    best = _classify_at(contour, epsilon, peri, area)
+    for k in (2, 3):
+        if best is not None and (best[1] <= 0.15 or best[0] == "cross"):
+            break  # 좋은 해석이거나 십자(비정형이어도 거친 근사로는 마름모가 될 뿐)면 그대로
+        r = _classify_at(contour, k * epsilon, peri, area)
+        # 거친 근사는 넓이가 원래 외곽선과 비슷할 때만 믿는다(0.7~1.3배): 십자를 팔 끝 4점으로 이으면 마름모(정사각형)가
+        # 되는데 넓이가 두 배라 걸러진다. 꼭짓점이 외곽선 위에 찍히므로 모서리가 둥근 도형의 내접 다각형은 20% 쯤 작다.
+        if r is not None and 0.7 <= cv2.contourArea(r[2].astype(np.float32)) / area <= 1.3 and (best is None or r[1] < best[1]):
+            best = r
+    return best
+
+
+def _classify_at(contour: np.ndarray, epsilon: float, peri: float, area: float) -> tuple[str, float, np.ndarray] | None:
     approx = cv2.approxPolyDP(contour, epsilon * peri, True).reshape(-1, 2).astype(np.float64)
     n = len(approx)
     # 꼭짓점 수는 epsilon 으로 정하되, 위치는 같은 수를 주는 가장 작은 epsilon 으로 다시 잡는다 (변 길이 오차 ↓)
@@ -203,6 +221,12 @@ def classify(contour: np.ndarray, epsilon: float = 0.02) -> tuple[str, float, np
             break
     convex = cv2.isContourConvex(approx.astype(np.float32))
     circularity = 4 * np.pi * area / (peri * peri)
+    if convex and 3 <= n <= 6:
+        # 볼록 다각형 도형은 외곽선 자체도 볼록해야 한다. 울퉁불퉁한 덩어리(얼굴, 손)가 거친 근사에서 사각형으로
+        # 둔갑하지 않게 solidity(넓이 / 볼록 껍질 넓이)로 거른다.
+        hull_area = cv2.contourArea(cv2.convexHull(contour))
+        if hull_area <= 0 or area / hull_area < 0.85:
+            return None
 
     if n == 3 and convex:
         return "triangle", _spread_q(_edge_lengths(approx)), approx
@@ -253,8 +277,14 @@ def _cross(approx: np.ndarray) -> tuple[str, float, np.ndarray] | None:
     _, (w, h), _ = cv2.minAreaRect(approx.astype(np.float32))
     aspect = abs(min(w, h) / max(w, h) - 1) if max(w, h) > 0 else 1.0
     # 팔 폭(끝변)은 ±1px 양자화 몫을 빼고 본다: 선을 팽창한 십자는 폭이 5px 안팎이라 1px 이 20% 다
-    width_dev = _spread_q(lengths[ends], 2.0)
-    return "cross", max(width_dev, _spread_q(lengths[~ends]), aspect), approx
+    # 가장 넓은 끝 하나는 뺀다: 팔 끝이 옆 글자나 손가락에 붙으면 그 끝만 넓어지는데 팔 길이·종횡비가 이미 십자를 보증한다
+    width_dev = _spread_q(np.sort(lengths[ends])[:3], 2.0)
+    # 팔 길이는 중심에서 팔 끝(끝변의 중점)까지로 잰다. 안쪽 오목 꼭짓점은 가는 획에서 위치가 몇 px 씩 흔들려
+    # 옆변 길이로 재면 20% 넘게 튀지만 팔 끝은 안정적이다.
+    centroid = approx.mean(axis=0)
+    tips = np.array([(approx[i] + approx[(i + 1) % n]) / 2 for i in range(n) if ends[i]])
+    arms = np.linalg.norm(tips - centroid, axis=1)
+    return "cross", max(width_dev, _spread_q(arms), aspect), approx
 
 
 REGULAR_TYPES = ("triangle", "square", "cross", "circle", "pentagon", "hexagon")  # regular_only 에서 허용

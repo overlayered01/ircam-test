@@ -46,6 +46,7 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | D2C align | on / off | color + depth 가 켜져 있을 때만 의미 있음. 4K 에서 느리면 끈다. 즉시 적용 |
 | Auto distance | on / off | 화면 중앙 depth 의 중앙값을 거리로 사용 (depth 켜졌을 때). 즉시 적용 |
 | Detect | off / apriltag / shapes / both | IR 패널에 검출 결과 오버레이 + 요약. 즉시 적용, 장치를 바꿔도 유지 |
+| Detect width | 640 / 1280 / full | 검출용 축소 폭. DMK 에서 작은 도형은 full |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | |
 | Invert image | on / off | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |

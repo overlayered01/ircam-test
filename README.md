@@ -158,6 +158,7 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | 항목 | 값 | 비고 |
 |---|---|---|
 | Detect | off / apriltag / shapes / both | 재시작 없이 즉시 적용 |
+| Detect width | 640 / 1280 / full | 검출용 축소 폭. DMK 2448px 에서 작은 도형을 보려면 full (outline 포함 약 90 ms) |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
@@ -173,6 +174,22 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
   - outline: 국소(adaptive) 이진화로 가는 선만 뽑아 닫힘·팽창으로 잇고, 닫힌 윤곽은 안쪽 구멍을, 구멍 없는 획(십자 두 줄)은 팽창된 바깥을
     분류한다. 획이 주변보다 어두운 후보만 받는다 (invert 면 밝은 쪽). 손으로 그린 도형, 또는 종이가 밝아 Otsu 임계값이 종이/배경 사이로
     잡혀 펜 선이 사라지는 장면용. 640x576 약 5 ms, 1280px 축소 영상 약 22 ms.
+  - 작은 도형: 모서리가 뭉개져 꼭짓점이 남거나(사각형 → 육각형) 잘리면(삼각형 꼭대기 → 사다리꼴) 2배·3배 거친 근사로 다시 보고
+    편차가 작은 해석을 고른다 (넓이가 0.7~1.3배로 맞고, 볼록 도형은 solidity ≥ 0.85 일 때만).
+  - 최소 크기 (어두운 방 + 인쇄 시트 합성, 실측 IR 노이즈, Regular only 10%, 5회 중 5회 성공 기준, 외접 사각형 한 변):
+
+    | 도형 | filled | outline |
+    |---|---|---|
+    | circle | 8 px | 20 px |
+    | square | 10 px | 20 px |
+    | cross | 12 px | 15 px |
+    | triangle | 20 px | 25 px |
+    | pentagon | 30 px | 30 px |
+    | hexagon | 40 px (작으면 원과 혼동) | 불안정 |
+
+    Femto Mega NFOV 640x576 은 2.7 m 에서 1 px ≈ 5.4 mm 다 (초점거리 ≈ 505 px). 즉 사각형 ≥ 55 mm, 십자 ≥ 65 mm,
+    삼각형 ≥ 110 mm, 오각형 ≥ 160 mm 가 하한이고 여유를 두려면 1.5배. DMK 2448x2048 은 같은 화각이면 픽셀이 3.8배 촘촘해
+    (렌즈 8 mm 기준 1 px ≈ 1.2 mm) 60 mm 시트가 50 px 로 보인다 — 단, Detect width 를 full 로 두어야 한다 (1280 이면 26 px).
   - 종이에 선으로 그린 도형은 640x576 에서 한 변 30px 이상(1 m 에서 약 7 cm)은 돼야 안정적으로 잡힌다. 작은 손그림 삼각형은 선이 끊기면 못 잡는다.
   - 정형 편차는 픽셀 양자화 몫(1px / 변 길이)을 빼고 센다. 20px 변은 1px 이 이미 5% 라 그만큼은 봐준다.
   - 뷰어는 도형을 프레임 간 추적한다: 라벨의 `[xx%]` 가 최근 30프레임 중 검출된 비율(검출률), 요약의 `hit xx%` 는 그 평균.
