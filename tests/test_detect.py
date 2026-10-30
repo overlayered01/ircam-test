@@ -106,6 +106,25 @@ def test_min_size_filter():
     assert len(found) == 1 and found[0].size_px == pytest.approx(160, abs=4)
 
 
+def test_filled_shapes_on_paper_in_dark_room():
+    """어두운 방에서 밝은 종이 위의 검정 도형: 배경 덩어리의 구멍 안에 있어도 전부 잡혀야 한다."""
+    img = np.full((576, 640), 12, np.uint8)
+    paper = shapes_image()
+    paper = cv2.resize(paper, (480, 360), interpolation=cv2.INTER_AREA)
+    img[100:460, 80:560] = (paper.astype(np.float32) * 0.6 + 10).astype(np.uint8)
+    found, _ = det.ShapeDetector(det.ShapeOptions(mode="filled")).detect(img)
+    assert sorted(s.name for s in found) == ["circle", "cross", "hexagon", "rect", "square", "triangle"]
+    found, _ = det.ShapeDetector(det.ShapeOptions(mode="both")).detect(img)
+    assert sorted(s.name for s in found) == ["circle", "cross", "hexagon", "rect", "square", "triangle"]  # 중복 없음
+
+
+def test_same_spot_requires_similar_size():
+    big = det.ShapeDet("rect", np.zeros((4, 2)), (300.0, 300.0), 90000.0, 300.0, 0.4)
+    small = det.ShapeDet("square", np.zeros((4, 2)), (320.0, 310.0), 900.0, 30.0, 0.02)
+    near = det.ShapeDet("square", np.zeros((4, 2)), (325.0, 312.0), 1000.0, 32.0, 0.03)
+    assert not det._same_spot(big, small) and det._same_spot(small, near)
+
+
 def test_shapes_bright_on_dark_with_invert():
     img = 255 - shapes_image()
     assert "square" not in {s.name for s in det.ShapeDetector().detect(img)[0]}

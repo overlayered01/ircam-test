@@ -295,8 +295,12 @@ class ShapeDetector:
         mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV  # 기본: 어두운 도형 → 흰색
         _, bw = cv2.threshold(blur, 0, 255, mode + cv2.THRESH_OTSU)
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return list(contours)
+        # RETR_EXTERNAL 이면 어두운 배경(= 흰 덩어리) 안의 밝은 종이(구멍) 위에 있는 도형은 돌아오지 않는다.
+        # CCOMP 의 최상위(parent == -1)는 구멍 안의 덩어리도 포함한다.
+        contours, hier = cv2.findContours(bw, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hier is None:
+            return []
+        return [c for c, h in zip(contours, hier[0]) if h[3] == -1]
 
     @staticmethod
     def _outline_contours(gray: np.ndarray, invert: bool) -> list[np.ndarray]:
@@ -313,12 +317,19 @@ class ShapeDetector:
         hier = hier[0]
         out = []
         for i, (_, _, child, parent) in enumerate(hier):
-            if parent != -1 or not _dark_stroke(gray, bw0, contours[i], invert):
+            if parent != -1:
+                continue
+            stroke = _dark_stroke(gray, bw0, contours[i], invert)
+            if stroke is None:
                 continue
             if child == -1:
                 out.append(contours[i])  # 구멍 없는 획 (십자)
             while child != -1:
-                out.append(contours[child])  # 닫힌 윤곽의 안쪽
+                # 닫힌 윤곽의 안쪽. 안쪽이 획보다 밝아야 선 도형이다 — 채운 도형은 가장자리 안쪽에 띠가 생기고
+                # 그 구멍은 어두우므로 여기서 걸러 filled 결과와 겹치지 않는다.
+                inner = _inside_mean(gray, contours[child]) - stroke
+                if (-inner if invert else inner) > 8.0:
+                    out.append(contours[child])
                 child = hier[child][0]
         return out
 
@@ -351,8 +362,17 @@ class ShapeDetector:
         return out, rejected
 
 
-def _dark_stroke(gray: np.ndarray, bw: np.ndarray, contour: np.ndarray, invert: bool, margin: float = 8.0) -> bool:
-    """획(이진화 흰 부분)이 바로 바깥 띠보다 어두우면 True (invert 면 밝으면 True).
+def _inside_mean(gray: np.ndarray, contour: np.ndarray) -> float:
+    """외곽선 안쪽 평균 밝기."""
+    x, y, w, h = cv2.boundingRect(contour)
+    roi = np.zeros((h, w), np.uint8)
+    cv2.drawContours(roi, [contour - (x, y)], -1, 255, -1)
+    m = roi > 0
+    return float(gray[y:y + h, x:x + w][m].mean()) if m.any() else 0.0
+
+
+def _dark_stroke(gray: np.ndarray, bw: np.ndarray, contour: np.ndarray, invert: bool, margin: float = 8.0) -> float | None:
+    """획(이진화 흰 부분)이 바로 바깥 띠보다 어두우면 획의 평균 밝기, 아니면 None (invert 면 밝아야 함).
     밝은 채움 도형의 가장자리(어두운 배경 쪽에 생기는 띠)를 선 도형으로 오인하지 않게 한다."""
     x, y, w, h = cv2.boundingRect(contour)
     pad = 4
@@ -363,15 +383,21 @@ def _dark_stroke(gray: np.ndarray, bw: np.ndarray, contour: np.ndarray, invert: 
     stroke = (roi > 0) & (bw[y0:y1, x0:x1] > 0)
     band = (cv2.dilate(roi, np.ones((3, 3), np.uint8), iterations=3) > 0) & (roi == 0)
     if not stroke.any() or not band.any():
-        return False
+        return None
     g = gray[y0:y1, x0:x1]
-    diff = float(g[band].mean()) - float(g[stroke].mean())
-    return (-diff if invert else diff) > margin
+    stroke_mean = float(g[stroke].mean())
+    diff = float(g[band].mean()) - stroke_mean
+    return stroke_mean if (-diff if invert else diff) > margin else None
 
 
 def _same_spot(a: ShapeDet, b: ShapeDet) -> bool:
+    """중심이 작은 쪽 짧은 변의 절반 안에 있고 크기도 비슷(1.5배 이내)해야 같은 도형. 큰 후보(종이 전체 등)가
+    그 안의 작은 도형을 삼키지 않게 한다."""
+    small, big = sorted((a.size_px, b.size_px))
+    if small <= 0 or big > 1.5 * small:
+        return False
     d = np.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1])
-    return d < 0.5 * max(a.size_px, b.size_px)
+    return d < 0.5 * small
 
 
 class ShapeTracker:
