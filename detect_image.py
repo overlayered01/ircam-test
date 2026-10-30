@@ -32,6 +32,7 @@ def main() -> int:
     ap.add_argument("--regular", action="store_true", help="정형(정삼각형·정사각형·정십자·원…)만")
     ap.add_argument("--tol", type=float, default=0.1, help="정형 허용 편차 비율 (기본 0.1 = 10%%)")
     ap.add_argument("--min-px", type=int, default=20, help="도형 최소 크기 (외접 사각형 짧은 변, 픽셀)")
+    ap.add_argument("--shape-mode", default="both", choices=det.SHAPE_MODES, help="filled = 채워진 도형, outline = 선 도형, both")
     ap.add_argument("--invert", action="store_true", help="검출 전 영상 반전 (흰 테두리 태그 / 어두운 바탕의 밝은 도형)")
     ap.add_argument("--max-width", type=int, default=1280, help="검출용 축소 폭 (0 = 원본 그대로)")
     ap.add_argument("--out", type=Path, default=None, help="오버레이 PNG + JSON 저장 폴더 (기본: 입력 옆 *_det.png)")
@@ -49,7 +50,7 @@ def main() -> int:
         gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         if gray.dtype != "uint8":
             gray = to_u8(gray)
-        opts = det.ShapeOptions(a.shape_type, a.regular, a.tol, a.min_px)
+        opts = det.ShapeOptions(a.shape_type, a.regular, a.tol, a.min_px, a.shape_mode)
         res = pipe.run(gray, tags=not a.no_tags, shapes=a.shapes, family=a.family, invert=a.invert, shape_options=opts)
         print(f"{f.name}: {res.summary()}")
         for t in res.tags:

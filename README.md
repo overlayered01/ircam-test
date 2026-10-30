@@ -161,13 +161,21 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
+| Shape mode | both / filled / outline | filled = 속이 찬 도형, outline = 선으로 그린 도형(펜 선, 두 획 십자). both 는 둘 다 |
 | Regular only | on / off | 정형만: 정삼각형 · 정사각형 · 정십자 · 원 · 정오각형 · 정육각형. rect 는 제외 |
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차. 변 길이·대각선·팔 길이·종횡비가 이상값에서 벗어난 최대 비율 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 외접 사각형 짧은 변 최소 (원본 픽셀) |
 
 - 태그: `pupil-apriltags` 가 있으면 그것(hamming / decision_margin 표시), 없으면 OpenCV ArUco. 두 검출기 모두 **검은 테두리** 를 찾는다.
-- 도형: Otsu 이진화 → 외곽선 → 다각형 근사. triangle / square / rect / cross(십자) / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
+- 도형: triangle / square / rect / cross(십자) / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
   도형마다 정형 편차(dev %)를 같이 표시한다 (주황 = 허용 안, 노랑 = 허용 밖). 어두운 장면에서는 큰 어두운 영역이 rect 로 잡히니 노출을 올리고 보자.
+  - filled: 영상 전체 Otsu 이진화 → 바깥 외곽선 → 다각형 근사. 인쇄한 검정 도형용. 640x576 에서 약 1 ms.
+  - outline: 국소(adaptive) 이진화로 가는 선만 뽑아 닫힘·팽창으로 잇고, 닫힌 윤곽은 안쪽 구멍을, 구멍 없는 획(십자 두 줄)은 팽창된 바깥을
+    분류한다. 획이 주변보다 어두운 후보만 받는다 (invert 면 밝은 쪽). 손으로 그린 도형, 또는 종이가 밝아 Otsu 임계값이 종이/배경 사이로
+    잡혀 펜 선이 사라지는 장면용. 640x576 약 5 ms, 1280px 축소 영상 약 22 ms.
+  - 종이에 선으로 그린 도형은 640x576 에서 한 변 30px 이상(1 m 에서 약 7 cm)은 돼야 안정적으로 잡힌다. 작은 손그림 삼각형은 선이 끊기면 못 잡는다.
+- 인쇄용 시트: `python shape_sheet.py` → `shapes/shapes_filled.png`, `shapes/shapes_outline.png` (A4 300 dpi, 여섯 도형 60 mm, 선 2 mm).
+  `--size`, `--stroke` 로 바꾼다. 100% 배율로 레이저 인쇄.
 - 검출은 폭 1280px 로 줄인 영상에서 하고 좌표는 원본으로 돌린다 (DMK 2448x2048 도 약 50ms).
 - `s` 스냅샷의 JSON 에 태그 id·중심·한 변 픽셀·코너, 도형 이름·중심·면적이 들어간다.
 - 저장된 영상으로 다시 돌리려면:
@@ -212,7 +220,9 @@ gige_discover.py GigE Vision 카메라 탐색 / 임시 IP
 third_party/tisgrabber/  IC Imaging Control 3.x 래퍼 DLL (DMK 용, 출처는 안의 README)
 check_tags.py   april_tags/ 태그 파일 검증
 detect_image.py 저장된 영상에서 태그·도형 검출
+shape_sheet.py  인쇄용 도형 테스트 시트 생성 → shapes/
 april_tags/     사용할 AprilTag PNG (apriltag-imgs 형식)
+shapes/         인쇄용 도형 시트 (filled / outline, A4 300 dpi)
 tests/          단위 테스트 (장치 불필요): .\.venv\Scripts\python -m pytest
 results/        출력 (gitignore)
 ```

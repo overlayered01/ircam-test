@@ -112,6 +112,40 @@ def test_shapes_bright_on_dark_with_invert():
     assert "square" in {s.name for s in det.ShapeDetector().detect(img, invert=True)[0]}
 
 
+def outline_image(thickness: int = 1) -> np.ndarray:
+    """펜으로 그린 종이: 테두리만 있는 정사각형·정삼각형·원과 두 획 십자. 배경은 어두운 방."""
+    img = np.full((576, 640), 12, np.uint8)
+    cv2.rectangle(img, (120, 100), (560, 480), 150, -1)  # 종이
+    cv2.rectangle(img, (160, 140), (260, 240), 85, thickness)
+    cv2.polylines(img, [regular_polygon((360, 190), 55, 3, -np.pi / 2)], True, 85, thickness)
+    cv2.circle(img, (470, 190), 50, 85, thickness)
+    cv2.line(img, (200, 330), (200, 430), 85, thickness)  # 십자 세로 획
+    cv2.line(img, (150, 380), (250, 380), 85, thickness)  # 십자 가로 획
+    return img
+
+
+@pytest.mark.parametrize("mode", ["outline", "both"])
+def test_outline_shapes_and_stroke_cross(mode):
+    found, _ = det.ShapeDetector(det.ShapeOptions(mode=mode)).detect(outline_image())
+    names = sorted(s.name for s in found)
+    assert names == ["circle", "cross", "square", "triangle"], names  # both 여도 중복 없음
+    by = {s.name: s for s in found}
+    for name in ("square", "triangle", "circle", "cross"):
+        assert by[name].dev < 0.1, (name, by[name].dev)
+    assert abs(by["cross"].center[0] - 200) < 3 and abs(by["cross"].center[1] - 380) < 3
+    assert abs(by["square"].center[0] - 210) < 3 and abs(by["square"].center[1] - 190) < 3
+    # Otsu(filled) 만으로는 종이가 통째로 잡힐 뿐 선 도형은 못 찾는다
+    names = {s.name for s in det.ShapeDetector(det.ShapeOptions(mode="filled")).detect(outline_image())[0]}
+    assert "cross" not in names and "circle" not in names
+
+
+def test_outline_mode_ignores_bright_filled_shapes():
+    """밝은 채움 도형의 가장자리를 선 도형으로 오인하지 않는다 (invert 를 켜야 잡힌다)."""
+    img = 255 - shapes_image()
+    assert det.ShapeDetector(det.ShapeOptions(mode="outline")).detect(img)[0] == []
+    assert "square" in {s.name for s in det.ShapeDetector(det.ShapeOptions(mode="outline")).detect(img, invert=True)[0]}
+
+
 def test_pipeline_scales_large_image_back_to_original_coords():
     big = cv2.resize(tag_image("tag36h11", 9, px=40), (2448, 2048), interpolation=cv2.INTER_NEAREST)
     res = det.Pipeline(backend="opencv", max_width=1024).run(big, tags=True, shapes=False)

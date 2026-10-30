@@ -49,6 +49,7 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | |
 | Invert image | on / off | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
+| Shape mode | both / filled / outline | 속이 찬 도형 / 선으로 그린 도형(두 획 십자 포함) / 둘 다 |
 | Regular only | on / off | 정삼각형·정사각형·정십자·원·정오각형·정육각형만 (rect 제외) |
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 도형 최소 크기 (외접 사각형 짧은 변) |

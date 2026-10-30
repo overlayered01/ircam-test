@@ -117,6 +117,7 @@ class ViewFlags:
     shape_regular: bool = True  # 정형(정삼각형·정사각형·정십자·원)만
     shape_tol: float = 0.1  # 정형 허용 편차
     shape_min: int = 20  # 최소 크기 (원본 픽셀)
+    shape_mode: str = "both"  # det.SHAPE_MODES: filled / outline / both
 
     @property
     def tags(self) -> bool:
@@ -128,7 +129,7 @@ class ViewFlags:
 
     @property
     def shape_options(self) -> det.ShapeOptions:
-        return det.ShapeOptions(self.shape_type, self.shape_regular, self.shape_tol, self.shape_min)
+        return det.ShapeOptions(self.shape_type, self.shape_regular, self.shape_tol, self.shape_min, self.shape_mode)
 
 
 DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
@@ -209,12 +210,14 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
     types = list(det.SHAPE_TYPES)
     tols = [f"{int(t * 100)}%" for t in det.SHAPE_TOLS]
     mins = [str(v) for v in det.SHAPE_MIN_PX]
+    modes = list(det.SHAPE_MODES)
     g = "detect"
     return [
         MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect), g),
         MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0, g),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
+        MenuRow("smode", "Shape mode", modes, modes.index(flags.shape_mode) if flags.shape_mode in modes else 0, g),
         MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular), g),
         MenuRow("stol", "Shape tolerance", tols, _nearest(list(det.SHAPE_TOLS), flags.shape_tol), g),
         MenuRow("smin", "Shape min px", mins, _nearest(list(det.SHAPE_MIN_PX), flags.shape_min), g),
@@ -228,6 +231,7 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
         family=m.row("family").value,
         invert=bool(m.get("invert")),
         shape_type=m.row("stype").value,
+        shape_mode=m.row("smode").value,
         shape_regular=bool(m.get("sreg")),
         shape_tol=det.SHAPE_TOLS[m.get("stol")],
         shape_min=det.SHAPE_MIN_PX[m.get("smin")],

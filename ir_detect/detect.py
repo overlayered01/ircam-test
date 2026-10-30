@@ -27,6 +27,7 @@ _CV_DICT = {
 SHAPE_TYPES = ("all", "triangle", "square", "cross", "circle", "rect", "pentagon", "hexagon")
 SHAPE_TOLS = (0.05, 0.1, 0.15, 0.2, 0.3)
 SHAPE_MIN_PX = (10, 20, 40, 80, 160)
+SHAPE_MODES = ("both", "filled", "outline")  # 채워진 도형 / 선으로 그린 도형 / 둘 다
 
 
 @dataclass
@@ -67,6 +68,7 @@ class ShapeOptions:
     regular_only: bool = False  # 정형(정삼각형·정사각형·정십자·원…)만
     tol: float = 0.1  # 정형 허용 편차 (비율)
     min_px: int = 20  # 외접 사각형 짧은 변 최소 (원본 픽셀)
+    mode: str = "both"  # SHAPE_MODES: filled = 채워진 도형(Otsu), outline = 선 도형(국소 이진화), both
     epsilon: float = 0.02  # approxPolyDP 둘레 비율
     max_area_frac: float = 0.5
 
@@ -206,28 +208,56 @@ def classify(contour: np.ndarray, epsilon: float = 0.02) -> tuple[str, float, np
     if n == 6 and convex:
         return "hexagon", _spread(_edge_lengths(approx)), approx
     if n == 12 and not convex:
-        flags = _convex_flags(approx)
-        if (~flags).sum() == 4:  # 오목 꼭짓점 4개 = 십자
-            lengths = _edge_lengths(approx)
-            # 양 끝이 모두 볼록인 변 = 팔 끝 (4개), 나머지 = 팔 옆면 (8개)
-            ends = np.array([flags[i] and flags[(i + 1) % n] for i in range(n)])
-            if ends.sum() == 4:
-                _, (w, h), _ = cv2.minAreaRect(approx.astype(np.float32))
-                aspect = abs(min(w, h) / max(w, h) - 1) if max(w, h) > 0 else 1.0
-                dev = max(_spread(lengths[ends]), _spread(lengths[~ends]), aspect)
-                return "cross", dev, approx
+        r = _cross(approx)
+        if r is not None:
+            return r
     if n > 6 and convex and circularity > 0.75:
         (_, (w, h), _) = cv2.fitEllipse(contour) if len(contour) >= 5 else (None, (1.0, 1.0), 0)
         aspect = abs(min(w, h) / max(w, h) - 1) if max(w, h) > 0 else 1.0
         # 래스터화된 완전한 원도 circularity 가 0.9 안팎이라 0.92 기준으로 모자란 만큼만 더한다
         return "circle", max(aspect, max(0.0, 0.92 - circularity) * 2), approx
+    # 가는 획 십자: 둘레 비율 epsilon 이 팔 폭보다 크면 끝변이 뭉개져 12각형이 안 나온다 → 더 작은 epsilon 으로 십자만 다시 본다
+    for eps in (0.01, 0.005):
+        if eps >= epsilon:
+            continue
+        fine = cv2.approxPolyDP(contour, eps * peri, True).reshape(-1, 2).astype(np.float64)
+        if len(fine) == 12 and not cv2.isContourConvex(fine.astype(np.float32)):
+            r = _cross(fine)
+            if r is not None:
+                return r
     return None
+
+
+def _cross(approx: np.ndarray) -> tuple[str, float, np.ndarray] | None:
+    """12각형 → 십자면 ('cross', dev, approx). 오목 꼭짓점 4개, 양 끝이 볼록인 변(팔 끝) 4개."""
+    n = len(approx)
+    flags = _convex_flags(approx)
+    if (~flags).sum() != 4:
+        return None
+    lengths = _edge_lengths(approx)
+    ends = np.array([flags[i] and flags[(i + 1) % n] for i in range(n)])  # 팔 끝 4개, 나머지 8개 = 팔 옆면
+    if ends.sum() != 4:
+        return None
+    _, (w, h), _ = cv2.minAreaRect(approx.astype(np.float32))
+    aspect = abs(min(w, h) / max(w, h) - 1) if max(w, h) > 0 else 1.0
+    # 팔 폭(끝변)은 ±1px 양자화 몫을 빼고 본다: 선을 팽창한 십자는 폭이 5px 안팎이라 1px 이 20% 다
+    width_dev = max(0.0, _spread(lengths[ends]) - 2.0 / float(np.mean(lengths[ends])))
+    return "cross", max(width_dev, _spread(lengths[~ends]), aspect), approx
 
 
 REGULAR_TYPES = ("triangle", "square", "cross", "circle", "pentagon", "hexagon")  # regular_only 에서 허용
 
 
 class ShapeDetector:
+    """채워진 도형(filled)과 선으로 그린 도형(outline)을 찾는다.
+
+    - filled: 영상 전체 Otsu 이진화 → 바깥 외곽선. 인쇄한 검정 도형용.
+    - outline: 국소(adaptive) 이진화로 가는 펜 선만 뽑아 닫힘·팽창으로 잇는다. 닫힌 윤곽(사각형·삼각형·원)은
+      안쪽 구멍 외곽선을 분류하고(꼭짓점이 뭉개지지 않는다), 구멍이 없는 획(십자 두 줄)은 팽창된 바깥 외곽선을
+      분류한다. 손으로 그린 도형이나, 종이 전체가 밝아 Otsu 임계값이 종이/배경 사이로 잡히는 장면용.
+    - both: 둘 다 돌리고 같은 자리(중심 거리 < 짧은 변의 절반)는 filled 쪽만 남긴다.
+    """
+
     def __init__(self, options: ShapeOptions = ShapeOptions()):
         self.options = options
 
@@ -235,14 +265,58 @@ class ShapeDetector:
                options: ShapeOptions | None = None) -> tuple[list[ShapeDet], int]:
         """(검출 목록, 조건으로 떨어진 후보 수)."""
         o = options or self.options
+        out: list[ShapeDet] = []
+        rejected: list[ShapeDet] = []
+        if o.mode in ("filled", "both"):
+            out, rejected = self._classify_all(self._filled_contours(gray, invert), gray, scale, o)
+        if o.mode in ("outline", "both"):
+            found, rej = self._classify_all(self._outline_contours(gray, invert), gray, scale, o)
+            seen = out + rejected  # filled 가 이미 본 자리(채택이든 탈락이든)는 다시 세지 않는다
+            out = out + [s for s in found if not any(_same_spot(s, f) for f in seen)]
+            rejected = rejected + [s for s in rej if not any(_same_spot(s, f) for f in seen)]
+        out.sort(key=lambda s: -s.area)
+        return out, len(rejected)
+
+    @staticmethod
+    def _filled_contours(gray: np.ndarray, invert: bool) -> list[np.ndarray]:
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV  # 기본: 어두운 도형 → 흰색
         _, bw = cv2.threshold(blur, 0, 255, mode + cv2.THRESH_OTSU)
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return list(contours)
+
+    @staticmethod
+    def _outline_contours(gray: np.ndarray, invert: bool) -> list[np.ndarray]:
+        w = gray.shape[1]
+        block = max(11, (w // 20) | 1)  # 640px → 31, 1280px → 63 (홀수)
+        grow = max(1, round(w / 320))  # 640px → 2: 1px 선이 5px 획이 되어 십자가 12각형으로 잡힌다
+        mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
+        bw0 = cv2.adaptiveThreshold(cv2.GaussianBlur(gray, (3, 3), 0), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, mode, block, 8)
+        bw = cv2.morphologyEx(bw0, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        bw = cv2.dilate(bw, np.ones((3, 3), np.uint8), iterations=grow)
+        contours, hier = cv2.findContours(bw, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if hier is None:
+            return []
+        hier = hier[0]
+        out = []
+        for i, (_, _, child, parent) in enumerate(hier):
+            if parent != -1 or not _dark_stroke(gray, bw0, contours[i], invert):
+                continue
+            if child == -1:
+                out.append(contours[i])  # 구멍 없는 획 (십자)
+            while child != -1:
+                out.append(contours[child])  # 닫힌 윤곽의 안쪽
+                child = hier[child][0]
+        return out
+
+    @staticmethod
+    def _classify_all(contours: list[np.ndarray], gray: np.ndarray, scale: float,
+                      o: ShapeOptions) -> tuple[list[ShapeDet], list[ShapeDet]]:
+        """(채택, 종류·정형·크기 조건으로 탈락) — 둘 다 원본 좌표의 ShapeDet."""
         total = gray.shape[0] * gray.shape[1]
         min_px = o.min_px / scale  # 검출 영상 픽셀로
-        out, rejected = [], 0
+        out, rejected = [], []
         for c in contours:
             area = cv2.contourArea(c)
             if area < min_px * min_px * 0.3 or area > total * o.max_area_frac:
@@ -254,15 +328,38 @@ class ShapeDetector:
             if r is None:
                 continue
             name, dev, _ = r
-            if (o.types != "all" and name != o.types) or (o.regular_only and (dev > o.tol or name not in REGULAR_TYPES)):
-                rejected += 1
-                continue
             m = cv2.moments(c)
             cx, cy = (m["m10"] / m["m00"], m["m01"] / m["m00"]) if m["m00"] else (0.0, 0.0)
-            out.append(ShapeDet(name, c.reshape(-1, 2).astype(np.float64) * scale, (cx * scale, cy * scale),
-                                area * scale * scale, min(w, h) * scale, dev))
-        out.sort(key=lambda s: -s.area)
+            s = ShapeDet(name, c.reshape(-1, 2).astype(np.float64) * scale, (cx * scale, cy * scale),
+                         area * scale * scale, min(w, h) * scale, dev)
+            if (o.types != "all" and name != o.types) or (o.regular_only and (dev > o.tol or name not in REGULAR_TYPES)):
+                rejected.append(s)
+            else:
+                out.append(s)
         return out, rejected
+
+
+def _dark_stroke(gray: np.ndarray, bw: np.ndarray, contour: np.ndarray, invert: bool, margin: float = 8.0) -> bool:
+    """획(이진화 흰 부분)이 바로 바깥 띠보다 어두우면 True (invert 면 밝으면 True).
+    밝은 채움 도형의 가장자리(어두운 배경 쪽에 생기는 띠)를 선 도형으로 오인하지 않게 한다."""
+    x, y, w, h = cv2.boundingRect(contour)
+    pad = 4
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(gray.shape[1], x + w + pad), min(gray.shape[0], y + h + pad)
+    roi = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    cv2.drawContours(roi, [contour - (x0, y0)], -1, 255, -1)
+    stroke = (roi > 0) & (bw[y0:y1, x0:x1] > 0)
+    band = (cv2.dilate(roi, np.ones((3, 3), np.uint8), iterations=3) > 0) & (roi == 0)
+    if not stroke.any() or not band.any():
+        return False
+    g = gray[y0:y1, x0:x1]
+    diff = float(g[band].mean()) - float(g[stroke].mean())
+    return (-diff if invert else diff) > margin
+
+
+def _same_spot(a: ShapeDet, b: ShapeDet) -> bool:
+    d = np.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1])
+    return d < 0.5 * max(a.size_px, b.size_px)
 
 
 class Pipeline:
