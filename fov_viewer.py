@@ -1134,7 +1134,8 @@ def main() -> None:
             elif ch == ord("s"):
                 meta = {"device": op.summary}
                 meta.update(view.snapshot_meta(op.st, distance) if op.kind == "orbbec" else view.snapshot_meta(op, fps))
-                save_snapshot(args.out, canvas, view.last, meta)
+                stem = save_snapshot(args.out, canvas, view.last, meta)
+                toast, toast_until = f"saved {stem.name}.*", time.time() + 3
     finally:
         switcher.join()
         if switcher.result is not None and isinstance(switcher.result[0], Opened):
@@ -1143,9 +1144,14 @@ def main() -> None:
         cv2.destroyAllWindows()
 
 
-def save_snapshot(out: Path, canvas: np.ndarray, last: dict, meta: dict) -> None:
+def save_snapshot(out: Path, canvas: np.ndarray, last: dict, meta: dict) -> Path:
+    """results/viewer_<시각>.* 로 저장하고 공통 경로(stem)를 돌려준다. 같은 초에 두 번 누르면 _2, _3 ... 을 붙인다."""
     out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp, n = base, 1
+    while (out / f"viewer_{stamp}.json").exists():
+        n += 1
+        stamp = f"{base}_{n}"
     cv2.imwrite(str(out / f"viewer_{stamp}.png"), canvas)
     cv2.imwrite(str(out / f"viewer_{stamp}_ir{last['ir'].dtype.itemsize * 8}.png"), last["ir"])
     if last["color"] is not None:
@@ -1154,6 +1160,7 @@ def save_snapshot(out: Path, canvas: np.ndarray, last: dict, meta: dict) -> None
         np.save(out / f"viewer_{stamp}_depth_mm.npy", last["depth"])
     (out / f"viewer_{stamp}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"스냅샷 저장: {out / f'viewer_{stamp}'}.*")
+    return out / f"viewer_{stamp}"
 
 
 if __name__ == "__main__":
