@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import cv2
@@ -56,6 +57,8 @@ class ShapeDet:
     area: float
     size_px: float = 0.0  # 외접 사각형 짧은 변 (원본 픽셀)
     dev: float = 0.0  # 정형에서 벗어난 최대 비율 (0 = 완벽한 정형)
+    rate: float | None = None  # ShapeTracker: 최근 프레임 중 검출된 비율 (0~1)
+    held: bool = False  # ShapeTracker: 이번 프레임엔 없지만 직전까지 보여 유지 중
 
     @property
     def regular(self) -> bool:
@@ -92,6 +95,9 @@ class DetResult:
             for s in self.shapes:
                 counts[s.name] = counts.get(s.name, 0) + 1
             parts.append("shapes " + (" ".join(f"{k}:{v}" for k, v in counts.items()) or "0") + (f" (-{self.shapes_rejected})" if self.shapes_rejected else ""))
+            rates = [s.rate for s in self.shapes if s.rate is not None]
+            if rates:
+                parts.append(f"hit {np.mean(rates) * 100:.0f}%")
         return "  ".join(parts) + f"  {self.ms:.0f}ms"
 
 
@@ -161,6 +167,12 @@ def _spread(v: np.ndarray) -> float:
     return float(np.max(np.abs(v / m - 1.0))) if m > 0 else 1.0
 
 
+def _spread_q(v: np.ndarray, px: float = 1.0) -> float:
+    """픽셀 길이들의 편차에서 양자화 몫(px / 평균 길이)을 뺀 값. 20px 변은 1px 이 이미 5% 라 그만큼은 봐준다."""
+    m = float(np.mean(v))
+    return max(0.0, _spread(v) - px / m) if m > 0 else 1.0
+
+
 def _convex_flags(poly: np.ndarray) -> np.ndarray:
     """꼭짓점마다 볼록(True)/오목(False). 외곽선 방향에 무관하게 다수 쪽을 볼록으로 본다."""
     n = len(poly)
@@ -193,20 +205,20 @@ def classify(contour: np.ndarray, epsilon: float = 0.02) -> tuple[str, float, np
     circularity = 4 * np.pi * area / (peri * peri)
 
     if n == 3 and convex:
-        return "triangle", _spread(_edge_lengths(approx)), approx
+        return "triangle", _spread_q(_edge_lengths(approx)), approx
     if n == 4 and convex:
         sides = _edge_lengths(approx)
         diag = np.array([np.linalg.norm(approx[0] - approx[2]), np.linalg.norm(approx[1] - approx[3])])
-        diag_dev = _spread(diag)  # 대각선이 같으면 직사각형 (각이 90°)
-        side_dev = _spread(sides)
+        diag_dev = _spread_q(diag)  # 대각선이 같으면 직사각형 (각이 90°)
+        side_dev = _spread_q(sides)
         opp_dev = max(abs(sides[0] / sides[2] - 1), abs(sides[1] / sides[3] - 1))  # 마주보는 변
         if side_dev <= 0.25:
             return "square", max(side_dev, diag_dev), approx
         return "rect", max(opp_dev, diag_dev), approx
     if n == 5 and convex:
-        return "pentagon", _spread(_edge_lengths(approx)), approx
+        return "pentagon", _spread_q(_edge_lengths(approx)), approx
     if n == 6 and convex:
-        return "hexagon", _spread(_edge_lengths(approx)), approx
+        return "hexagon", _spread_q(_edge_lengths(approx)), approx
     if n == 12 and not convex:
         r = _cross(approx)
         if r is not None:
@@ -241,8 +253,8 @@ def _cross(approx: np.ndarray) -> tuple[str, float, np.ndarray] | None:
     _, (w, h), _ = cv2.minAreaRect(approx.astype(np.float32))
     aspect = abs(min(w, h) / max(w, h) - 1) if max(w, h) > 0 else 1.0
     # 팔 폭(끝변)은 ±1px 양자화 몫을 빼고 본다: 선을 팽창한 십자는 폭이 5px 안팎이라 1px 이 20% 다
-    width_dev = max(0.0, _spread(lengths[ends]) - 2.0 / float(np.mean(lengths[ends])))
-    return "cross", max(width_dev, _spread(lengths[~ends]), aspect), approx
+    width_dev = _spread_q(lengths[ends], 2.0)
+    return "cross", max(width_dev, _spread_q(lengths[~ends]), aspect), approx
 
 
 REGULAR_TYPES = ("triangle", "square", "cross", "circle", "pentagon", "hexagon")  # regular_only 에서 허용
@@ -362,13 +374,74 @@ def _same_spot(a: ShapeDet, b: ShapeDet) -> bool:
     return d < 0.5 * max(a.size_px, b.size_px)
 
 
-class Pipeline:
-    """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다."""
+class ShapeTracker:
+    """연속 프레임의 도형을 자리(이름 + 중심 거리 < 짧은 변의 절반)로 이어 붙여 검출률을 센다.
 
-    def __init__(self, backend: str = "auto", max_width: int = 1280):
+    rate = 최근 window 프레임 중 검출된 비율. 이번 프레임에 안 보여도 hold 프레임 안에 보였으면 마지막 모양을
+    held=True 로 돌려줘 화면이 깜빡이지 않는다. window 프레임 동안 한 번도 안 보이면 지운다.
+    """
+
+    @dataclass
+    class Track:
+        last: ShapeDet
+        seen: deque  # 최근 프레임마다 True/False
+        miss: int = 0  # 연속으로 안 보인 프레임 수
+
+        @property
+        def rate(self) -> float:
+            return float(np.mean(self.seen)) if self.seen else 0.0
+
+    def __init__(self, window: int = 30, hold: int = 10):
+        self.window, self.hold = window, hold
+        self.tracks: list[ShapeTracker.Track] = []
+
+    def reset(self) -> None:
+        self.tracks.clear()
+
+    def update(self, shapes: list[ShapeDet]) -> list[ShapeDet]:
+        """이번 프레임 검출 목록 → rate 가 붙은 목록 (유지 중인 것 포함)."""
+        matched: set[int] = set()
+        out: list[ShapeDet] = []
+        for s in shapes:
+            best = None
+            for i, t in enumerate(self.tracks):
+                if i in matched or t.last.name != s.name or not _same_spot(s, t.last):
+                    continue
+                if best is None or s.area > 0 and abs(t.last.area - s.area) < abs(self.tracks[best].last.area - s.area):
+                    best = i
+            if best is None:
+                self.tracks.append(self.Track(s, deque([True], maxlen=self.window)))
+                best = len(self.tracks) - 1
+            else:
+                t = self.tracks[best]
+                t.last, t.miss = s, 0
+                t.seen.append(True)
+            matched.add(best)
+            s.rate, s.held = self.tracks[best].rate, False
+            out.append(s)
+        keep = []
+        for i, t in enumerate(self.tracks):
+            if i not in matched:
+                t.seen.append(False)
+                t.miss += 1
+                if t.miss > self.window or not any(t.seen):
+                    continue
+                if t.miss <= self.hold:
+                    held = ShapeDet(t.last.name, t.last.contour, t.last.center, t.last.area, t.last.size_px, t.last.dev, t.rate, True)
+                    out.append(held)
+            keep.append(t)
+        self.tracks = keep
+        return out
+
+
+class Pipeline:
+    """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다. track=True 면 도형을 프레임 간 추적해 검출률을 붙인다."""
+
+    def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False):
         self.backend, self.max_width = backend, max_width
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
+        self.tracker = ShapeTracker() if track else None
 
     def run(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
             shape_options: ShapeOptions | None = None) -> DetResult:
@@ -384,6 +457,10 @@ class Pipeline:
             res.backend = self._tag.backend
         if shapes:
             res.shapes, res.shapes_rejected = self._shape.detect(small, invert, scale, shape_options)
+            if self.tracker is not None:
+                res.shapes = self.tracker.update(res.shapes)
+        elif self.tracker is not None:
+            self.tracker.reset()
         res.ms = (time.perf_counter() - t0) * 1000
         return res
 
@@ -400,6 +477,9 @@ def draw(img: np.ndarray, res: DetResult, s: float = 1.0, thickness: int = 2) ->
     for sh in res.shapes:
         pts = (sh.contour * s).astype(np.int32).reshape(-1, 1, 2)
         color = (255, 160, 0) if sh.regular else (0, 140, 255)  # 정형 = 주황, 비정형 = 노랑빛
-        cv2.polylines(img, [pts], True, color, thickness)
-        cv2.putText(img, f"{sh.name} {sh.dev * 100:.0f}%", (int(sh.center[0] * s) - 24, int(sh.center[1] * s)),
+        if sh.held:
+            color = (160, 160, 160)  # 이번 프레임엔 못 봤지만 직전까지 보인 것
+        cv2.polylines(img, [pts], True, color, max(1, thickness - 1) if sh.held else thickness)
+        label = f"{sh.name} {sh.dev * 100:.0f}%" + (f" [{sh.rate * 100:.0f}%]" if sh.rate is not None else "")
+        cv2.putText(img, label, (int(sh.center[0] * s) - 24, int(sh.center[1] * s)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)

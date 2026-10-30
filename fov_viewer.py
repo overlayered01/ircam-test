@@ -951,7 +951,7 @@ def main() -> None:
             raise SystemExit(f"'{args.device}' 에 맞는 장치가 없습니다. 연결된 장치: {', '.join(labels)}")
 
     op = open_device(ctx, choices, dev_i, target, args.port)
-    detp = det.Pipeline()
+    detp = det.Pipeline(track=True)  # 도형은 프레임 간 추적해 검출률 [xx%] 표시
     views = {"orbbec": OrbbecView(cell_w, cell_h, detp), "tis": TisView(cell_w, cell_h, detp)}
     switcher = Switcher()
     canvas = None

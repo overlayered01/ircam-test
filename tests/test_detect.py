@@ -146,6 +146,38 @@ def test_outline_mode_ignores_bright_filled_shapes():
     assert "square" in {s.name for s in det.ShapeDetector(det.ShapeOptions(mode="outline")).detect(img, invert=True)[0]}
 
 
+def test_shape_tracker_rate_and_hold():
+    def sq(cx):
+        return det.ShapeDet("square", np.array([[cx - 20, 80], [cx + 20, 80], [cx + 20, 120], [cx - 20, 120]], float),
+                            (cx, 100.0), 1600.0, 40.0, 0.02)
+    tr = det.ShapeTracker(window=10, hold=2)
+    out = tr.update([sq(100)])
+    assert out[0].rate == 1.0 and not out[0].held
+    out = tr.update([])  # 1프레임 놓침 → 유지
+    assert len(out) == 1 and out[0].held and out[0].rate == 0.5
+    out = tr.update([sq(102)])  # 같은 자리로 다시
+    assert len(out) == 1 and not out[0].held and out[0].rate == pytest.approx(2 / 3)
+    for _ in range(3):
+        out = tr.update([])
+    assert out == []  # hold 를 넘기면 화면에서 사라진다
+    out = tr.update([sq(100)])
+    assert out[0].rate == pytest.approx(3 / 7)  # 트랙은 window 안이라 아직 살아 있다
+    out = tr.update([sq(400)])  # 다른 자리 → 새 트랙, 기존 것은 유지
+    assert sorted((s.name, s.held, round(s.rate, 2)) for s in out) == [("square", False, 1.0), ("square", True, 0.38)]
+    for _ in range(12):
+        tr.update([])
+    assert tr.tracks == []
+
+
+def test_pipeline_track_adds_rate_and_summary():
+    p = det.Pipeline(backend="opencv", track=True)
+    res = p.run(shapes_image(), tags=False, shapes=True)
+    assert all(s.rate == 1.0 for s in res.shapes) and "hit 100%" in res.summary()
+    res = p.run(np.full((600, 800), 230, np.uint8), tags=False, shapes=True)  # 빈 종이 → 전부 유지(held)
+    assert res.shapes and all(s.held and s.rate == 0.5 for s in res.shapes)
+    assert det.Pipeline(backend="opencv").run(shapes_image(), tags=False, shapes=True).shapes[0].rate is None
+
+
 def test_pipeline_scales_large_image_back_to_original_coords():
     big = cv2.resize(tag_image("tag36h11", 9, px=40), (2448, 2048), interpolation=cv2.INTER_NEAREST)
     res = det.Pipeline(backend="opencv", max_width=1024).run(big, tags=True, shapes=False)
