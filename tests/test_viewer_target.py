@@ -16,6 +16,9 @@ from fov_viewer import (  # noqa: E402
     describe,
     orbbec_menu_result,
     sort_devices,
+    step_value,
+    EXPOSURE_MS,
+    GAIN_DB,
 )
 
 IR_MODES = [(320, 288), (640, 576), (512, 512), (1024, 1024)]
@@ -130,3 +133,10 @@ def test_sort_devices_prefers_dmk_then_mega_then_bolt():
     assert [c.label.split()[0] + c.label.split()[-2] for c in sort_devices(found)] == [
         "DMK36814688", "DMK99", "FemtoCL2P661007P", "FemtoUSB3.1", "GeminiUSB3.1"]  # DMK(발견 순) → Mega → Bolt → 나머지
     assert sort_devices([]) == []
+
+
+def test_step_value_moves_one_step_and_clamps():
+    assert step_value(EXPOSURE_MS, 10.0, 1) == 15 and step_value(EXPOSURE_MS, 10.0, -1) == 7
+    assert step_value(EXPOSURE_MS, 41.67, 1) == 50 and step_value(EXPOSURE_MS, 41.67, -1) == 30  # 가장 가까운 단계(40) 기준
+    assert step_value(EXPOSURE_MS, 1000, 1) == 1000 and step_value(EXPOSURE_MS, 0.05, -1) == 0.05
+    assert step_value(GAIN_DB, None, 1) == 3 and step_value(GAIN_DB, 46.4, 1) == 48

@@ -193,18 +193,24 @@ class TisDmkSource(CameraSource):
         ic = _lib()
         return ic.IC_SetPropertySwitch(self._h, ic._tis.T(prop), ic._tis.T("Auto"), int(on)) == IC_SUCCESS
 
-    def get_value(self, prop: str) -> float | None:
-        """절대값: Exposure 는 초, Gain 은 dB."""
+    def get_value(self, prop: str, element: str = "Value") -> float | None:
+        """절대값: Exposure 는 초, Gain 은 dB. element 는 "Value" 또는 "Auto Max Value" (자동 노출 상한) 등."""
         ic = _lib()
         v = ctypes.c_float()
-        ok = ic.IC_GetPropertyAbsoluteValue(self._h, ic._tis.T(prop), ic._tis.T("Value"), v) == IC_SUCCESS
+        ok = ic.IC_GetPropertyAbsoluteValue(self._h, ic._tis.T(prop), ic._tis.T(element), v) == IC_SUCCESS
         return float(v.value) if ok else None
 
-    def value_range(self, prop: str) -> tuple[float, float] | None:
+    def value_range(self, prop: str, element: str = "Value") -> tuple[float, float] | None:
+        """DMK 33GX264: Exposure 20 µs ~ 30 s, Gain 0 ~ 48 dB. 프레임 간격보다 긴 노출은 카메라가 fps 를 그만큼 낮춘다."""
         ic = _lib()
         lo, hi = ctypes.c_float(), ctypes.c_float()
-        ok = ic.IC_GetPropertyAbsoluteValueRange(self._h, ic._tis.T(prop), ic._tis.T("Value"), lo, hi) == IC_SUCCESS
+        ok = ic.IC_GetPropertyAbsoluteValueRange(self._h, ic._tis.T(prop), ic._tis.T(element), lo, hi) == IC_SUCCESS
         return (float(lo.value), float(hi.value)) if ok else None
+
+    def set_auto_max(self, prop: str, value: float) -> bool:
+        """자동 노출/게인의 상한 ("Auto Max Value"). 자동이 켜진 채로 상한만 바꾼다."""
+        ic = _lib()
+        return ic.IC_SetPropertyAbsoluteValue(self._h, ic._tis.T(prop), ic._tis.T("Auto Max Value"), ctypes.c_float(value)) == IC_SUCCESS
 
     def set_value(self, prop: str, value: float) -> bool:
         """자동이 켜져 있으면 끄고 값을 넣는다."""

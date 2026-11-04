@@ -24,6 +24,7 @@
 
 키:  e 설정 메뉴   메뉴 안: ↑↓(w/s) 항목   ←→(a/d) 값 변경   Enter 적용   Esc/e 닫기
      +/- 거리 ±100mm   [ ] 거리 ±1000mm   s 스냅샷 저장   q/ESC 종료
+     DMK: , . 노출 한 단계 −/+   ; ' 게인 한 단계 −/+ (메뉴 없이 즉시 적용, 자동은 꺼진다)
   스트림 구성이나 장치를 바꾸면 재시작 (Bolt USB ~4초, Mega 이더넷 ~2초, DMK ~1초). 그동안 창은 계속 반응한다.
   fps 는 켜진 스트림이 공통으로 지원하는 최댓값으로 자동 선택된다 (메뉴에서 고정 가능).
   Femto 의 IR 과 depth 는 같은 센서라 항상 같은 모드로 켜진다.
@@ -93,8 +94,15 @@ KEY_RIGHT = {2555904, 65363}
 KEY_ENTER = {13, 10}
 KEY_ESC = 27
 
-EXPOSURE_MS = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200]
-GAIN_DB = [0, 3, 6, 9, 12, 18, 24, 30, 36, 42, 48]
+# DMK 노출 단계 (ms). 카메라 범위는 0.02 ms ~ 30 s 이고 프레임 간격(24 fps 면 41.7 ms)보다 길면 fps 가 그만큼 떨어진다
+EXPOSURE_MS = [0.05, 0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30, 40, 50, 70, 100, 150, 200, 300, 500, 1000]
+GAIN_DB = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48]
+
+
+def step_value(options: list[float], current: float | None, d: int) -> float:
+    """현재 값에 가장 가까운 단계에서 d 칸 이동한 값 (끝에서는 멈춤). 라이브 키 , . ; ' 용."""
+    i = _nearest(options, current)
+    return options[max(0, min(len(options) - 1, i + d))]
 
 
 @dataclass(frozen=True)
@@ -301,11 +309,14 @@ def build_tis_menu(labels: list[str], op: "Opened", flags: ViewFlags) -> MenuSta
     mode_opts = [f"{m.pixel_format} {m.res}" for m in op.modes]
     mode_i = op.modes.index(src.mode) if src.mode in op.modes else 0
     exp = src.get_value("Exposure")
+    exp_max = src.get_value("Exposure", "Auto Max Value")
+    exp_opts = [f"{v:g}" for v in EXPOSURE_MS]
     rows = [
         MenuRow("dev", "Device", labels, op.dev),
         MenuRow("mode", "Mode", mode_opts, mode_i),
         MenuRow("exp_auto", "Exposure auto", ["off", "on"], _onoff(src.get_auto("Exposure"))),
-        MenuRow("exp", "Exposure (ms)", [f"{v:g}" for v in EXPOSURE_MS], _nearest(EXPOSURE_MS, exp * 1000 if exp else None)),
+        MenuRow("exp", "Exposure (ms)", exp_opts, _nearest(EXPOSURE_MS, exp * 1000 if exp else None)),
+        MenuRow("exp_max", "Exposure auto max (ms)", exp_opts, _nearest(EXPOSURE_MS, exp_max * 1000 if exp_max else None)),
         MenuRow("gain_auto", "Gain auto", ["off", "on"], _onoff(src.get_auto("Gain"))),
         MenuRow("gain", "Gain (dB)", [str(v) for v in GAIN_DB], _nearest(GAIN_DB, src.get_value("Gain"))),
     ]
@@ -881,6 +892,9 @@ class TisView:
         self._props: tuple = (None, None, None, None)  # exposure, gain, exp auto, gain auto
         self._props_t = 0.0
 
+    def reset_props(self) -> None:
+        self._props_t = 0.0  # 다음 프레임에 바로 다시 읽는다 (라이브 키로 바꾼 직후)
+
     def props(self, src: TisDmkSource) -> tuple:
         """노출·게인 읽기는 카메라 왕복(GigE 제어 패킷)이라 매 프레임 대신 0.5초마다."""
         if time.time() - self._props_t > 0.5:
@@ -1050,6 +1064,8 @@ def main() -> None:
                 src.set_auto("Exposure", True)
             elif m.changed("exp") or (m.changed("exp_auto") and not m.get("exp_auto")):
                 src.set_value("Exposure", EXPOSURE_MS[m.get("exp")] / 1000.0)
+            if m.changed("exp_max"):
+                src.set_auto_max("Exposure", EXPOSURE_MS[m.get("exp_max")] / 1000.0)
             if m.changed("gain_auto") and m.get("gain_auto"):
                 src.set_auto("Gain", True)
             elif m.changed("gain") or (m.changed("gain_auto") and not m.get("gain_auto")):
@@ -1122,7 +1138,8 @@ def main() -> None:
                 panels = view.panels(op, flags, fps)
                 footer = f"{fps:.1f}fps   "
             canvas = viz.grid(panels, 2, cell_w, cell_h)
-            viz.put_text(canvas, footer + "e menu   +/- [ ] distance   s save   q quit",
+            viz.put_text(canvas, footer + ("e menu   , . exposure   ; ' gain   s save   q quit" if op.kind == "tis"
+                                           else "e menu   +/- [ ] distance   s save   q quit"),
                          (10, canvas.shape[0] - 10), 0.5, viz.YELLOW)
             if time.time() < toast_until:
                 viz.put_text(canvas, toast, (10, canvas.shape[0] - 40), 0.7, viz.YELLOW)
@@ -1195,6 +1212,19 @@ def main() -> None:
                 distance += 1000
             elif ch == ord("["):
                 distance = max(100, distance - 1000)
+            elif op.kind == "tis" and ch in (ord(","), ord("."), ord(";"), ord("'")):
+                # DMK 노출/게인 라이브 조절: 메뉴 없이 즉시 적용 (스트리밍 중 레지스터 쓰기 한 번, 다음 프레임부터 반영)
+                src: TisDmkSource = op.source
+                if ch in (ord(","), ord(".")):
+                    v = step_value(EXPOSURE_MS, (src.get_value("Exposure") or 0) * 1000, -1 if ch == ord(",") else 1)
+                    src.set_value("Exposure", v / 1000.0)
+                    toast = f"exposure {v:g} ms (fixed)"
+                else:
+                    v = step_value(GAIN_DB, src.get_value("Gain"), -1 if ch == ord(";") else 1)
+                    src.set_value("Gain", float(v))
+                    toast = f"gain {v:g} dB (fixed)"
+                toast_until = time.time() + 2
+                view.reset_props()
             elif ch == ord("s"):
                 meta = {"device": op.summary}
                 meta.update(view.snapshot_meta(op.st, distance) if op.kind == "orbbec" else view.snapshot_meta(op, fps))

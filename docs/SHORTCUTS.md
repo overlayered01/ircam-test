@@ -63,9 +63,17 @@ DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 | Device | 위와 같음 | |
 | Mode | Y800 2448x2048 → … → Y16 640x240 | 픽셀 포맷 × 해상도. 실제 fps 는 링크 대역폭이 결정 (100 Mbps: 전체 해상도 ~1.7fps) |
 | Exposure auto | on / off | 값을 바꾸면 자동으로 off |
-| Exposure (ms) | 0.05 … 200 | 즉시 적용 (재시작 없음). 시작부터 고정하려면 `--exposure 10 --gain 20` |
+| Exposure (ms) | 0.05 … 1000 (22단계) | 즉시 적용 (재시작 없음). 프레임 간격(24 fps 면 41.7 ms)보다 길면 fps 가 그만큼 떨어진다. 시작부터 고정하려면 `--exposure 10 --gain 20` |
+| Exposure auto max (ms) | 0.05 … 1000 | 자동 노출이 올라갈 수 있는 상한 (카메라 "Auto Max Value"). 자동을 켠 채 상한만 바꾼다 |
 | Gain auto | on / off | |
-| Gain (dB) | 0 … 48 | 즉시 적용 |
+| Gain (dB) | 0 … 48 (3 dB 단계) | 즉시 적용 |
+
+DMK 에서는 메뉴 없이 키로도 바꾼다 (즉시 적용, 자동은 꺼진다, 토스트로 값 표시):
+
+| 키 | 동작 |
+|---|---|
+| `,` / `.` | 노출 한 단계 내림 / 올림 |
+| `;` / `'` | 게인 3 dB 내림 / 올림 |
 | Angle grid | on / off | `calib/dmk_<serial>.json` 이 있을 때만 나온다 |
 | Detect / Tag family / Invert image / Shape … | 위와 같음 | |
 
