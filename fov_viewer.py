@@ -19,6 +19,8 @@
     python fov_viewer.py --ip 192.168.1.10                 # Femto Mega 이더넷 (자동 탐색 안 될 때)
     python fov_viewer.py --device dmk                      # 이름에 'dmk' 가 들어간 장치로 시작
     python fov_viewer.py --ir 1024x1024@15 --depth --color # 모드·스트림 지정해서 시작
+    python fov_viewer.py --device dmk --exposure 10 --gain 20 --detect apriltag --tag-decimate 2
+                                                           # DMK 노출 10ms/게인 20dB 고정 (자동 off), 태그 검출 빠르게
 
 키:  e 설정 메뉴   메뉴 안: ↑↓(w/s) 항목   ←→(a/d) 값 변경   Enter 적용   Esc/e 닫기
      +/- 거리 ±100mm   [ ] 거리 ±1000mm   s 스냅샷 저장   q/ESC 종료
@@ -119,6 +121,7 @@ class ViewFlags:
     shape_min: int = 20  # 최소 크기 (원본 픽셀)
     shape_mode: str = "both"  # det.SHAPE_MODES: filled / outline / both
     detect_width: int = 1280  # 검출용 축소 폭 (0 = 원본 그대로). DMK 2448px 에서 작은 도형은 full 로
+    tag_decimate: float = 1.0  # det.TAG_DECIMATES: 2 면 태그 검출 4~6배 빠름, 최소 태그 크기 2배
 
     @property
     def tags(self) -> bool:
@@ -136,6 +139,7 @@ class ViewFlags:
 DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
 DETECT_WIDTHS = ["640", "1280", "full"]  # 검출용 축소 폭
 DETECT_WIDTH_VALUES = (640, 1280, 0)
+TAG_DECIMATES = [f"{v:g}" for v in det.TAG_DECIMATES]
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +223,7 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
         MenuRow("detect", "Detect", DETECT_OPTS, DETECT_OPTS.index(flags.detect), g),
         MenuRow("dwidth", "Detect width", DETECT_WIDTHS, _nearest(list(DETECT_WIDTH_VALUES), flags.detect_width), g),
         MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0, g),
+        MenuRow("tdec", "Tag decimate", TAG_DECIMATES, _nearest(list(det.TAG_DECIMATES), flags.tag_decimate), g),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
         MenuRow("smode", "Shape mode", modes, modes.index(flags.shape_mode) if flags.shape_mode in modes else 0, g),
@@ -234,6 +239,7 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
         detect=m.row("detect").value,
         detect_width=DETECT_WIDTH_VALUES[m.get("dwidth")],
         family=m.row("family").value,
+        tag_decimate=det.TAG_DECIMATES[m.get("tdec")],
         invert=bool(m.get("invert")),
         shape_type=m.row("stype").value,
         shape_mode=m.row("smode").value,
@@ -648,10 +654,10 @@ def show_message(w: int, h: int, lines: list[str], base: np.ndarray | None = Non
 class OrbbecView:
     """Femto 프레임 → 4 패널. depth 유효 영역 이동평균 등 프레임 간 상태를 들고 있다."""
 
-    def __init__(self, cell_w: int, cell_h: int, detp: det.Pipeline):
+    def __init__(self, cell_w: int, cell_h: int, detw: det.DetectWorker):
         self.cell_w, self.cell_h = cell_w, cell_h
         self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
-        self.detp = detp
+        self.detw = detw
         self.align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
         self.reset()
 
@@ -754,8 +760,7 @@ class OrbbecView:
             viz.draw_polygon(ir, c_in_i * si, viz.MAGENTA, 2)
             ir_lines.append("magenta: color FOV")
         if flags.detect != "off":
-            self.detp.max_width = flags.detect_width or 10**9
-            self.det = self.detp.run(to_u8(last["ir"]), flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
+            self.det = submit_detect(self.detw, to_u8(last["ir"]), flags)
             det.draw(ir, self.det, si)
             ir_lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
 
@@ -852,16 +857,25 @@ def detection_meta(res: det.DetResult) -> dict:
 class TisView:
     """DMK 프레임 → IR 패널 하나 (나머지는 비움)."""
 
-    def __init__(self, cell_w: int, cell_h: int, detp: det.Pipeline):
+    def __init__(self, cell_w: int, cell_h: int, detw: det.DetectWorker):
         self.cell_w, self.cell_h = cell_w, cell_h
         self.blank = np.zeros((cell_h, cell_w, 3), np.uint8)
-        self.detp = detp
+        self.detw = detw
         self.reset()
 
     def reset(self) -> None:
         self.last = {"color": None, "ir": None, "depth": None}
         self.det = det.DetResult()
         self.frame = None
+        self._props: tuple = (None, None, None, None)  # exposure, gain, exp auto, gain auto
+        self._props_t = 0.0
+
+    def props(self, src: TisDmkSource) -> tuple:
+        """노출·게인 읽기는 카메라 왕복(GigE 제어 패킷)이라 매 프레임 대신 0.5초마다."""
+        if time.time() - self._props_t > 0.5:
+            self._props = (src.get_value("Exposure"), src.get_value("Gain"), src.get_auto("Exposure"), src.get_auto("Gain"))
+            self._props_t = time.time()
+        return self._props
 
     def ingest(self, frame) -> bool:
         self.frame = frame
@@ -873,11 +887,11 @@ class TisView:
         src: TisDmkSource = op.source
         s = viz.fit_scale(f.raw.shape[1], f.raw.shape[0], self.cell_w, self.cell_h)
         ir = cv2.cvtColor(viz.shrink(f.image, s), cv2.COLOR_GRAY2BGR)
-        exp, gain = src.get_value("Exposure"), src.get_value("Gain")
+        exp, gain, exp_auto, gain_auto = self.props(src)
         lines = [
             f"{op.summary.split('  ')[0].replace('name=', '')}",
             f"{f.mode.pixel_format} {f.mode.res}  set {f.meta.get('fps_set', 0):.1f}fps / actual {fps:.1f}fps",
-            f"exposure {exp * 1000:.2f}ms {'(auto)' if src.get_auto('Exposure') else ''}   gain {gain:.1f}dB {'(auto)' if src.get_auto('Gain') else ''}"
+            f"exposure {exp * 1000:.2f}ms {'(auto)' if exp_auto else '(fixed)'}   gain {gain:.1f}dB {'(auto)' if gain_auto else '(fixed)'}"
             if exp is not None and gain is not None else "",
             f"raw max {int(f.raw.max())} / {np.iinfo(f.raw.dtype).max}   sat {(f.image >= 250).mean() * 100:.1f}%"
             f"   focus {cv2.Laplacian(viz.shrink(f.image, s), cv2.CV_64F).var():.0f} (higher = sharper)",
@@ -889,8 +903,7 @@ class TisView:
         else:
             lines.append("no calibration: FOV overlay unavailable (calib/dmk_<serial>.json)")
         if flags.detect != "off":
-            self.detp.max_width = flags.detect_width or 10**9
-            self.det = self.detp.run(f.image, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options)
+            self.det = submit_detect(self.detw, f.image, flags)
             det.draw(ir, self.det, s)
             lines.append(f"{flags.family if flags.tags else ''} {'inv' if flags.invert else ''} {self.det.summary()}")
         na = ["n/a for this device"]
@@ -900,9 +913,25 @@ class TisView:
         f = self.frame
         src: TisDmkSource = op.source
         meta = {"mode": str(f.mode), "fps_set": f.meta.get("fps_set"), "fps_measured": round(fps, 2),
-                "exposure_s": src.get_value("Exposure"), "gain_db": src.get_value("Gain")}
+                "exposure_s": src.get_value("Exposure"), "gain_db": src.get_value("Gain"),
+                "exposure_auto": src.get_auto("Exposure"), "gain_auto": src.get_auto("Gain")}
         meta.update(detection_meta(self.det))
         return meta
+
+
+def submit_detect(detw: det.DetectWorker, gray: np.ndarray, flags: ViewFlags) -> det.DetResult:
+    """검출 스레드에 이 프레임을 넘기고(바쁘면 건너뜀) 지금까지의 마지막 결과를 돌려준다."""
+    detw.submit(gray, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options,
+                flags.detect_width, flags.tag_decimate)
+    return detw.result
+
+
+def apply_exposure(src: TisDmkSource, exposure_ms: float | None, gain_db: float | None) -> None:
+    """--exposure / --gain 시작 옵션: 값을 주면 자동을 끄고 고정한다 (장치를 다시 열거나 모드를 바꿔도 다시 적용)."""
+    if exposure_ms is not None:
+        src.set_value("Exposure", exposure_ms / 1000.0)
+    if gain_db is not None:
+        src.set_value("Gain", gain_db)
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +956,10 @@ def main() -> None:
     ap.add_argument("--invert", action="store_true", help="검출 전 영상 반전")
     ap.add_argument("--detect-width", type=int, default=1280, choices=DETECT_WIDTH_VALUES,
                     help="검출용 축소 폭 (0 = 원본). DMK 에서 작은 도형은 0")
+    ap.add_argument("--tag-decimate", type=float, default=1.0, choices=det.TAG_DECIMATES,
+                    help="AprilTag quad_decimate. 2 = 4~6배 빠름, 최소 태그 크기 2배")
+    ap.add_argument("--exposure", type=float, help="DMK 노출 고정 (ms). 자동 노출을 끈다")
+    ap.add_argument("--gain", type=float, help="DMK 게인 고정 (dB). 자동 게인을 끈다")
     args = ap.parse_args()
 
     ires = parse_res(args.ir)
@@ -960,13 +993,16 @@ def main() -> None:
             raise SystemExit(f"'{args.device}' 에 맞는 장치가 없습니다. 연결된 장치: {', '.join(labels)}")
 
     op = open_device(ctx, choices, dev_i, target, args.port)
-    detp = det.Pipeline(track=True)  # 도형은 프레임 간 추적해 검출률 [xx%] 표시
-    views = {"orbbec": OrbbecView(cell_w, cell_h, detp), "tis": TisView(cell_w, cell_h, detp)}
+    if op.kind == "tis":
+        apply_exposure(op.source, args.exposure, args.gain)
+    detw = det.DetectWorker(det.Pipeline(track=True))  # 검출은 별도 스레드 (도형은 프레임 간 추적해 검출률 [xx%] 표시)
+    views = {"orbbec": OrbbecView(cell_w, cell_h, detw), "tis": TisView(cell_w, cell_h, detw)}
     switcher = Switcher()
     canvas = None
     menu: MenuState | None = None
     distance = args.distance
-    flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width)
+    flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width,
+                      tag_decimate=args.tag_decimate)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 
@@ -982,7 +1018,10 @@ def main() -> None:
                     old_pipe.stop()
                 if old_src is not None:
                     old_src.close()
-                return open_device(ctx, choices, new_i, target, args.port)
+                new = open_device(ctx, choices, new_i, target, args.port)
+                if new.kind == "tis":
+                    apply_exposure(new.source, args.exposure, args.gain)
+                return new
 
             switcher.start(job, f"Opening {labels[new_i]}")
             return
@@ -1010,6 +1049,7 @@ def main() -> None:
                 def job(mode=mode):
                     src.stop()
                     src.start(mode)
+                    apply_exposure(src, args.exposure, args.gain)
                     op.intr = src.intrinsics(mode)
                     return "restarted"
 
@@ -1150,6 +1190,7 @@ def main() -> None:
                 stem = save_snapshot(args.out, canvas, view.last, meta)
                 toast, toast_until = f"saved {stem.name}.*", time.time() + 3
     finally:
+        detw.close()
         switcher.join()
         if switcher.result is not None and isinstance(switcher.result[0], Opened):
             op = switcher.result[0]  # 장치 전환 중 종료 → 새로 열린 쪽을 닫는다

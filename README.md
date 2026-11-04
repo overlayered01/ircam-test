@@ -139,7 +139,12 @@ IR 카메라(Femto Bolt / Femto Mega / DMK 33GX264)로 AprilTag·문양·도형 
   없으면 장치를 못 찾으므로, 같은 드라이버를 쓰는 IC 3.x 래퍼 `tisgrabber_x64.dll` 을 `third_party/tisgrabber/` 에 두고 ctypes 로 쓴다 (pip 설치 불필요).
 - 모드: Y800(8비트) / Y16(16비트, 12비트 ADC) × 2448x2048 … 640x240. fps 는 카메라 설정값과 무관하게 **링크 대역폭이 결정**한다:
   2448x2048 Y800 은 프레임당 5MB → 100 Mbps 링크에서 약 1.7fps, 1280x960 약 5fps. 1 Gbps 포트에서는 카메라 최대(2448x2048 약 24fps).
-- 노출·게인은 뷰어 메뉴에서 바꾼다 (`TisDmkSource.set_value / set_auto`). 기본 자동 노출은 어두운 IR 장면에서 짧게 잡히는 편이라 수동 20ms + 12dB 정도부터 보는 게 빠르다.
+- 노출·게인은 뷰어 메뉴에서 바꾸거나 `--exposure 10 --gain 20` (ms, dB) 으로 시작부터 고정한다 (자동 off, 장치를 다시 열거나 모드를
+  바꿔도 다시 적용). 자동 노출은 어두운 IR 장면에서 fps 한계(24 fps 면 41.67 ms)까지 올라가고 게인도 46 dB 근처에 붙는다 —
+  움직이는 태그는 흐려져 검출이 들쑥날쑥하고 노이즈가 커서 작은 태그를 놓친다. 10~20 ms 로 고정하고 모자라면 IR 조명을 더 준다.
+  패널의 `exposure … (fixed)` 로 고정 여부를 본다.
+- 프레임 드랍: 순수 수신은 2448x2048 Y800 에서 23.3~23.6 fps, 20초에 1~4장 손실(USB GbE 어댑터, 점보 프레임 없음)로 무시할 수준.
+  뷰어에서 보이던 드랍은 검출이 프레임 간격보다 길어 생긴 것이라 검출 스레드 분리로 사라진다. 그래도 끊기면 Tag decimate 2.
 - 네트워크: 카메라 기본은 link-local(169.254.x.x) + DHCP 라 PC 어댑터에 같은 서브넷 주소가 있어야 드라이버가 찾는다.
   어댑터에 고정 IP 를 넣으면 DHCP 가 꺼지면서 169.254 주소가 사라져 카메라가 안 보이게 된다. `gige_discover.py` 로 확인하고,
   관리자 권한이 없으면 `gige_discover.py --force-ip 192.168.1.20` 으로 카메라를 PC 서브넷으로 옮긴다 (카메라 전원을 끄면 원복).
@@ -160,6 +165,7 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | Detect | off / apriltag / shapes / both | 재시작 없이 즉시 적용 |
 | Detect width | 640 / 1280 / full | 검출용 축소 폭. DMK 2448px 에서 작은 도형을 보려면 full (outline 포함 약 90 ms) |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
+| Tag decimate | 1 / 2 / 4 | 태그 후보 탐색 해상도 1/n. 2 면 4~6배 빠르고(DMK 1280 폭 46 → 11~18 ms) 최소 태그 크기가 2배(36h11 18 → 36 px) |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
 | Shape mode | both / filled / outline | filled = 속이 찬 도형, outline = 선으로 그린 도형(펜 선, 두 획 십자). both 는 둘 다 |
@@ -167,6 +173,9 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차. 변 길이·대각선·팔 길이·종횡비가 이상값에서 벗어난 최대 비율 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 외접 사각형 짧은 변 최소 (원본 픽셀) |
 
+- 검출은 별도 스레드에서 돈다 (`det.DetectWorker`). 검출이 프레임 간격보다 오래 걸리면 그동안 들어온 프레임은 검출만 건너뛰고
+  영상은 카메라 fps 그대로 흐른다 (결과는 한두 프레임 늦게 따라온다). 같은 스레드에서 돌리던 때는 DMK 2448px 에서 검출 46 ms 가
+  프레임 41 ms 를 넘어 정확히 한 장 걸러 한 장씩 버려졌고(11.7 fps), 장면 따라 검출 시간이 달라져 간격이 튀었다.
 - 태그: `pupil-apriltags` 가 있으면 그것(hamming / decision_margin 표시), 없으면 OpenCV ArUco. 두 검출기 모두 **검은 테두리** 를 찾는다.
 - 도형: triangle / square / rect / cross(십자) / pentagon / hexagon / circle. 기본은 밝은 종이 위의 어두운 도형.
   도형마다 정형 편차(dev %)를 같이 표시한다 (주황 = 허용 안, 노랑 = 허용 밖). 어두운 장면에서는 큰 어두운 영역이 rect 로 잡히니 노출을 올리고 보자.

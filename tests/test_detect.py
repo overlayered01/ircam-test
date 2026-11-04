@@ -210,3 +210,35 @@ def test_pipeline_scales_large_image_back_to_original_coords():
     canvas = cv2.cvtColor(cv2.resize(big, (612, 512)), cv2.COLOR_GRAY2BGR)
     det.draw(canvas, res, 0.25)  # 그리기만 되면 됨
     assert det.Pipeline().run(big, tags=False, shapes=False).summary().endswith("0ms")
+
+
+def test_detect_worker_sync_and_threaded():
+    img = shapes_image()
+    w = det.DetectWorker(det.Pipeline(backend="opencv"), threaded=False)
+    assert w.submit(img, False, True, max_width=0) and w.result.shapes and w.skipped == 0
+    assert w.pipeline.max_width == 10**9  # max_width 0 = 원본
+
+    w = det.DetectWorker(det.Pipeline(backend="opencv"))
+    try:
+        assert w.result.summary().endswith("0ms")
+        w.submit(img, False, True)
+        w.wait()
+        assert not w.busy and [s.name for s in w.result.shapes]
+        # 바쁜 동안 들어온 프레임은 버린다: 큰 영상을 넣고 바로 하나 더
+        big = cv2.resize(img, None, fx=4, fy=4)
+        n = sum(w.submit(big, False, True, max_width=0) for _ in range(3))
+        w.wait()
+        assert n >= 1 and w.skipped == 3 - n
+    finally:
+        w.close()
+
+
+def test_tag_decimate_recreates_detector():
+    pytest.importorskip("pupil_apriltags")
+    p = det.Pipeline(backend="pupil", tag_decimate=1.0)
+    img = tag_image("tag36h11", 3, px=40)
+    assert [t.id for t in p.run(img, tags=True, shapes=False).tags] == [3]
+    d1 = p._tag
+    p.tag_decimate = 2.0
+    assert [t.id for t in p.run(img, tags=True, shapes=False).tags] == [3]
+    assert p._tag is not d1 and p._tag.decimate == 2.0

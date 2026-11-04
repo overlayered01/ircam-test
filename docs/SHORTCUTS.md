@@ -48,6 +48,7 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | Detect | off / apriltag / shapes / both | IR 패널에 검출 결과 오버레이 + 요약. 즉시 적용, 장치를 바꿔도 유지 |
 | Detect width | 640 / 1280 / full | 검출용 축소 폭. DMK 에서 작은 도형은 full |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | |
+| Tag decimate | 1 / 2 / 4 | 2 = 태그 검출 4~6배 빠름, 최소 태그 크기 2배. DMK 에서 끊기면 2 |
 | Invert image | on / off | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
 | Shape mode | both / filled / outline | 속이 찬 도형 / 선으로 그린 도형(두 획 십자 포함) / 둘 다 |
@@ -62,7 +63,7 @@ DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 | Device | 위와 같음 | |
 | Mode | Y800 2448x2048 → … → Y16 640x240 | 픽셀 포맷 × 해상도. 실제 fps 는 링크 대역폭이 결정 (100 Mbps: 전체 해상도 ~1.7fps) |
 | Exposure auto | on / off | 값을 바꾸면 자동으로 off |
-| Exposure (ms) | 0.05 … 200 | 즉시 적용 (재시작 없음) |
+| Exposure (ms) | 0.05 … 200 | 즉시 적용 (재시작 없음). 시작부터 고정하려면 `--exposure 10 --gain 20` |
 | Gain auto | on / off | |
 | Gain (dB) | 0 … 48 | 즉시 적용 |
 | Angle grid | on / off | `calib/dmk_<serial>.json` 이 있을 때만 나온다 |

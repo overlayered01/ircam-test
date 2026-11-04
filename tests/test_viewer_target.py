@@ -11,6 +11,7 @@ from fov_viewer import (  # noqa: E402
     Target,
     ViewFlags,
     build_orbbec_menu,
+    detect_flags,
     describe,
     orbbec_menu_result,
 )
@@ -106,3 +107,13 @@ def test_describe():
     assert describe(Target()) == "IR default / depth off / color off"
     s = describe(Target(ires=(1024, 1024, 15), depth=True, color=True, cres=(1920, 1080, 0)))
     assert s.startswith("IR 1024x1024 WFOV") and "@15" in s and s.endswith("depth on / color 1920x1080")
+
+
+def test_detect_rows_round_trip():
+    flags = ViewFlags(detect="apriltag", detect_width=0, tag_decimate=2.0, shape_mode="filled")
+    m = menu(flags=flags)
+    assert m.row("dwidth").value == "full" and m.row("tdec").value == "2"
+    assert detect_flags(m, ViewFlags()) == flags
+    m.sel = [r.key for r in m._rows].index("tdec")
+    m.adjust(1)
+    assert detect_flags(m, ViewFlags()).tag_decimate == 4.0

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ SHAPE_TYPES = ("all", "triangle", "square", "cross", "circle", "rect", "pentagon
 SHAPE_TOLS = (0.05, 0.1, 0.15, 0.2, 0.3)
 SHAPE_MIN_PX = (10, 20, 40, 80, 160)
 SHAPE_MODES = ("both", "filled", "outline")  # 채워진 도형 / 선으로 그린 도형 / 둘 다
+TAG_DECIMATES = (1.0, 2.0, 4.0)  # pupil quad_decimate: 사각형 후보 탐색 해상도 1/n (코너는 원본에서 보정)
 
 
 @dataclass
@@ -112,17 +114,19 @@ def prepare(gray: np.ndarray, max_width: int = 1280) -> tuple[np.ndarray, float]
 
 
 class AprilTagDetector:
-    def __init__(self, family: str = "tag36h11", backend: str = "auto", min_margin: float = 10.0):
+    def __init__(self, family: str = "tag36h11", backend: str = "auto", min_margin: float = 10.0, decimate: float = 1.0):
+        """decimate = pupil quad_decimate. 2 면 후보 탐색이 1/4 픽셀이라 4~6배 빠르지만 읽히는 최소 태그 크기가 2배로 커진다
+        (36h11 기준 18px → 36px). 코너는 원본 해상도에서 다시 맞추므로 위치 정밀도는 거의 그대로."""
         if family not in _CV_DICT:
             raise ValueError(f"지원하지 않는 계열: {family}")
-        self.family, self.min_margin = family, min_margin
+        self.family, self.min_margin, self.decimate = family, min_margin, decimate
         self._pupil = None
         if backend in ("auto", "pupil"):
             try:
                 from pupil_apriltags import Detector
 
                 # pupil-apriltags 는 tag36h10 을 모른다 → OpenCV 로
-                self._pupil = Detector(families=family, nthreads=2, quad_decimate=1.0, refine_edges=True)
+                self._pupil = Detector(families=family, nthreads=2, quad_decimate=decimate, refine_edges=True)
             except Exception:  # noqa: BLE001  ImportError 또는 미지원 계열
                 if backend == "pupil":
                     raise
@@ -493,8 +497,8 @@ class ShapeTracker:
 class Pipeline:
     """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다. track=True 면 도형을 프레임 간 추적해 검출률을 붙인다."""
 
-    def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False):
-        self.backend, self.max_width = backend, max_width
+    def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0):
+        self.backend, self.max_width, self.tag_decimate = backend, max_width, tag_decimate
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
         self.tracker = ShapeTracker() if track else None
@@ -507,8 +511,8 @@ class Pipeline:
             return res
         small, scale = prepare(gray, self.max_width)
         if tags:
-            if self._tag is None or self._tag.family != family:
-                self._tag = AprilTagDetector(family, self.backend)
+            if self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate:
+                self._tag = AprilTagDetector(family, self.backend, decimate=self.tag_decimate)
             res.tags, res.rejected = self._tag.detect(small, invert, scale)
             res.backend = self._tag.backend
         if shapes:
@@ -519,6 +523,79 @@ class Pipeline:
             self.tracker.reset()
         res.ms = (time.perf_counter() - t0) * 1000
         return res
+
+
+class DetectWorker:
+    """Pipeline.run 을 별도 스레드에서 돌린다. submit() 은 바로 돌아오고 result 에 마지막 결과가 남는다.
+
+    검출이 한 프레임 시간보다 길면(DMK 2448px 에서 AprilTag 46 ms vs 프레임 41 ms) 같은 스레드에서는 다음 프레임을 놓쳐
+    표시가 절반 fps 로 떨어지고 간격이 튄다. 여기서는 검출 중에 들어온 프레임은 버리고(skipped) 항상 최신 프레임만 처리해
+    영상은 카메라 fps 그대로 흐르고 검출 결과만 한두 프레임 늦게 따라온다. threaded=False 면 submit 안에서 바로 돌린다 (테스트용).
+    """
+
+    def __init__(self, pipeline: Pipeline, threaded: bool = True):
+        self.pipeline = pipeline
+        self.result = DetResult()
+        self.skipped = 0  # 검출 중이라 버린 프레임 수 (누적)
+        self._pending: tuple | None = None
+        self._busy = False
+        self._stop = False
+        self._cv = threading.Condition()
+        self._thread = threading.Thread(target=self._loop, daemon=True) if threaded else None
+        if self._thread is not None:
+            self._thread.start()
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def submit(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
+               shape_options: ShapeOptions | None = None, max_width: int = 1280, tag_decimate: float = 1.0) -> bool:
+        """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다."""
+        if self._thread is None:
+            self._run(gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate)
+            return True
+        with self._cv:
+            if self._busy or self._pending is not None:
+                self.skipped += 1
+                return False
+            self._pending = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate)
+            self._cv.notify()
+        return True
+
+    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate) -> None:
+        self.pipeline.max_width = max_width or 10**9
+        self.pipeline.tag_decimate = tag_decimate
+        self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options)
+
+    def _loop(self) -> None:
+        while True:
+            with self._cv:
+                while self._pending is None and not self._stop:
+                    self._cv.wait()
+                if self._stop:
+                    return
+                job, self._pending, self._busy = self._pending, None, True
+            try:
+                self._run(*job)
+            except Exception as e:  # noqa: BLE001  검출 오류로 뷰어가 죽지 않게
+                print(f"detect error: {e}")
+            finally:
+                self._busy = False
+
+    def wait(self, timeout: float = 5.0) -> None:
+        """대기 중/진행 중인 검출이 끝날 때까지 (테스트·스냅샷용)."""
+        t_end = time.perf_counter() + timeout
+        while (self._busy or self._pending is not None) and time.perf_counter() < t_end:
+            time.sleep(0.002)
+
+    def close(self) -> None:
+        if self._thread is None:
+            return
+        with self._cv:
+            self._stop = True
+            self._cv.notify()
+        self._thread.join(timeout=2)
 
 
 def draw(img: np.ndarray, res: DetResult, s: float = 1.0, thickness: int = 2) -> None:
