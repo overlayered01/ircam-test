@@ -44,8 +44,8 @@ IR 을 기본으로 띄우고, 장치·모드·depth/color 켜기 끄기는 `e` 
 장치는 Femto Bolt / Femto Mega (Orbbec) 와 DMK 33GX264 (The Imaging Source GigE) 를 지원하며 메뉴에서 서로 바꿀 수 있다.
 
 ```powershell
-.\.venv\Scripts\python fov_viewer.py                                   # 첫 번째 장치, IR 만
-.\.venv\Scripts\python fov_viewer.py --device dmk                      # 이름에 dmk 가 들어간 장치로 시작 (mega / bolt 도 됨)
+.\.venv\Scripts\python fov_viewer.py                                   # 연결된 것 중 DMK → Femto Mega → Femto Bolt 순으로 시작, IR 만
+.\.venv\Scripts\python fov_viewer.py --device bolt                     # 이름에 bolt 가 들어간 장치로 시작 (dmk / mega 도 됨)
 .\.venv\Scripts\python fov_viewer.py --serial CL8764100GL              # Orbbec 장치 S/N 지정
 .\.venv\Scripts\python fov_viewer.py --ip 192.168.1.10                 # Femto Mega 이더넷 (자동 탐색 안 될 때)
 .\.venv\Scripts\python fov_viewer.py --ir 1024x1024@15 --depth --color # 모드·스트림 지정해서 시작

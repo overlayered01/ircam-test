@@ -14,7 +14,7 @@
   - 'auto' 모드에서는 화면 중앙의 실제 depth 중앙값을 거리로 사용한다 (depth 가 켜져 있을 때).
   - Depth 패널의 'valid' FOV 는 실제로 깊이 값이 나온 픽셀의 각도 범위 (WFOV 원형 영역 확인용).
 
-    python fov_viewer.py                                   # 첫 번째 장치, IR 만 (장치 기본 모드)
+    python fov_viewer.py                                   # 연결된 것 중 DMK → Femto Mega → Femto Bolt 순으로 첫 장치, IR 만
     python fov_viewer.py --serial CL8764100GL              # Orbbec 장치 지정
     python fov_viewer.py --ip 192.168.1.10                 # Femto Mega 이더넷 (자동 탐색 안 될 때)
     python fov_viewer.py --device dmk                      # 이름에 'dmk' 가 들어간 장치로 시작
@@ -469,6 +469,17 @@ class Opened:
         self.pipeline = self.source = None
 
 
+DEVICE_PRIORITY = ("dmk", "mega", "bolt")  # 시작 장치 우선순위 (라벨에 포함된 문자열, 앞이 우선). 그 외는 뒤로
+
+
+def sort_devices(choices: list[DeviceChoice]) -> list[DeviceChoice]:
+    """DEVICE_PRIORITY 순으로 정렬 (같은 종류끼리는 발견 순서 유지). 메뉴 Device 목록도 이 순서."""
+    def rank(c: DeviceChoice) -> int:
+        label = c.label.lower()
+        return next((i for i, key in enumerate(DEVICE_PRIORITY) if key in label), len(DEVICE_PRIORITY))
+    return sorted(choices, key=rank)
+
+
 def device_label(e: DeviceEntry) -> str:
     s = f"{e.name.replace('Orbbec ', '')} {e.connection} {e.serial}"
     return f"{s} {e.ip}" if e.ip else s
@@ -484,7 +495,7 @@ def find_devices(ctx: Context, ip: str) -> list[DeviceChoice]:
         out += [DeviceChoice("tis", s.unique_name + " GigE", tis_name=s.unique_name) for s in TisDmkSource.discover()]
     else:
         print(f"[tis] {why}")
-    return out
+    return sort_devices(out)
 
 
 def open_device(ctx: Context, choices: list[DeviceChoice], i: int, target: Target, port: int,

@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("pyorbbecsdk")
 
 from fov_viewer import (  # noqa: E402
+    DeviceChoice,
     MenuRow,
     MenuState,
     Opened,
@@ -14,6 +15,7 @@ from fov_viewer import (  # noqa: E402
     detect_flags,
     describe,
     orbbec_menu_result,
+    sort_devices,
 )
 
 IR_MODES = [(320, 288), (640, 576), (512, 512), (1024, 1024)]
@@ -117,3 +119,14 @@ def test_detect_rows_round_trip():
     m.sel = [r.key for r in m._rows].index("tdec")
     m.adjust(1)
     assert detect_flags(m, ViewFlags()).tag_decimate == 4.0
+
+
+def test_sort_devices_prefers_dmk_then_mega_then_bolt():
+    found = [DeviceChoice("orbbec", "Femto Bolt USB3.1 CL8764100GL"),
+             DeviceChoice("orbbec", "Femto Mega Ethernet CL2P661007P 192.168.1.10"),
+             DeviceChoice("orbbec", "Gemini 2 USB3.1 X"),
+             DeviceChoice("tis", "DMK 33GX264 36814688 GigE", tis_name="DMK 33GX264 36814688"),
+             DeviceChoice("tis", "DMK 33GX264 99 GigE", tis_name="DMK 33GX264 99")]
+    assert [c.label.split()[0] + c.label.split()[-2] for c in sort_devices(found)] == [
+        "DMK36814688", "DMK99", "FemtoCL2P661007P", "FemtoUSB3.1", "GeminiUSB3.1"]  # DMK(발견 순) → Mega → Bolt → 나머지
+    assert sort_devices([]) == []
