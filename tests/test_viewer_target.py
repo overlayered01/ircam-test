@@ -115,9 +115,10 @@ def test_describe():
 
 
 def test_detect_rows_round_trip():
-    flags = ViewFlags(detect="apriltag", detect_width=0, tag_decimate=2.0, shape_mode="filled")
+    flags = ViewFlags(detect="apriltag", detect_width=0, tag_decimate=2.0, tag_sharpen=0.5, shape_mode="filled")
     m = menu(flags=flags)
-    assert m.row("dwidth").value == "full" and m.row("tdec").value == "2"
+    assert m.row("dwidth").value == "full" and m.row("tdec").value == "2" and m.row("tsharp").value == "0.5"
+    assert menu(flags=ViewFlags(detect_width=-2)).row("dwidth").value == "2x"
     assert detect_flags(m, ViewFlags()) == flags
     m.sel = [r.key for r in m._rows].index("tdec")
     m.adjust(1)

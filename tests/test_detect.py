@@ -233,7 +233,7 @@ def test_detect_worker_sync_and_threaded():
         w.close()
 
 
-def test_tag_decimate_recreates_detector():
+def test_tag_decimate_and_sharpen_recreate_detector():
     pytest.importorskip("pupil_apriltags")
     p = det.Pipeline(backend="pupil", tag_decimate=1.0)
     img = tag_image("tag36h11", 3, px=40)
@@ -241,4 +241,17 @@ def test_tag_decimate_recreates_detector():
     d1 = p._tag
     p.tag_decimate = 2.0
     assert [t.id for t in p.run(img, tags=True, shapes=False).tags] == [3]
-    assert p._tag is not d1 and p._tag.decimate == 2.0
+    assert p._tag is not d1 and p._tag.decimate == 2.0 and p._tag.sharpen == 1.0
+    p.tag_sharpen = 0.25
+    p.run(img, tags=True, shapes=False)
+    assert p._tag.sharpen == 0.25
+
+
+def test_prepare_upscale_and_coords():
+    img = tag_image("tag36h11", 5, px=12)  # 작은 태그
+    small, scale = det.prepare(img, 1280, upscale=2.0)
+    assert small.shape == (img.shape[0] * 2, img.shape[1] * 2) and scale == 0.5
+    res = det.Pipeline(backend="opencv", upscale=2.0).run(img, tags=True, shapes=False)
+    assert [t.id for t in res.tags] == [5]
+    cx, cy = res.tags[0].center
+    assert abs(cx - img.shape[1] / 2) < 3 and abs(cy - img.shape[0] / 2) < 3  # 원본 좌표

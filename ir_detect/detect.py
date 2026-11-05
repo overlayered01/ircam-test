@@ -31,6 +31,7 @@ SHAPE_TOLS = (0.05, 0.1, 0.15, 0.2, 0.3)
 SHAPE_MIN_PX = (10, 20, 40, 80, 160)
 SHAPE_MODES = ("both", "filled", "outline")  # 채워진 도형 / 선으로 그린 도형 / 둘 다
 TAG_DECIMATES = (1.0, 2.0, 4.0)  # pupil quad_decimate: 사각형 후보 탐색 해상도 1/n (코너는 원본에서 보정)
+TAG_SHARPENS = (0.25, 0.5, 1.0)  # pupil decode_sharpening: 비트 읽기 전 선명화. 1.0 이면 작은(18~22px)·흐린·회색 태그 검출률 ↑, 시간 동일
 
 
 @dataclass
@@ -103,10 +104,14 @@ class DetResult:
         return "  ".join(parts) + f"  {self.ms:.0f}ms"
 
 
-def prepare(gray: np.ndarray, max_width: int = 1280) -> tuple[np.ndarray, float]:
-    """검출용으로 줄인 영상과 (원본 / 검출 영상) 배율."""
+def prepare(gray: np.ndarray, max_width: int = 1280, upscale: float = 1.0) -> tuple[np.ndarray, float]:
+    """검출용으로 줄인(또는 upscale 배 키운) 영상과 (원본 / 검출 영상) 배율.
+
+    upscale 2 는 셀이 2~3px 밖에 안 되는 작은 태그용 (18px 태그 0/10 → 9/10). 픽셀이 4배라 시간도 4배 — 640x576 급에서 쓴다."""
     if gray.ndim == 3:
         gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    if upscale > 1.0:
+        return cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC), 1.0 / upscale
     if gray.shape[1] <= max_width:
         return gray, 1.0
     s = max_width / gray.shape[1]
@@ -114,19 +119,23 @@ def prepare(gray: np.ndarray, max_width: int = 1280) -> tuple[np.ndarray, float]
 
 
 class AprilTagDetector:
-    def __init__(self, family: str = "tag36h11", backend: str = "auto", min_margin: float = 10.0, decimate: float = 1.0):
+    def __init__(self, family: str = "tag36h11", backend: str = "auto", min_margin: float = 10.0, decimate: float = 1.0,
+                 sharpen: float = 1.0):
         """decimate = pupil quad_decimate. 2 면 후보 탐색이 1/4 픽셀이라 4~6배 빠르지만 읽히는 최소 태그 크기가 2배로 커진다
-        (36h11 기준 18px → 36px). 코너는 원본 해상도에서 다시 맞추므로 위치 정밀도는 거의 그대로."""
+        (36h11 기준 18px → 36px). 코너는 원본 해상도에서 다시 맞추므로 위치 정밀도는 거의 그대로.
+        sharpen = pupil decode_sharpening (라이브러리 기본 0.25). 1.0 이면 18px 36h11 이 0/10 → 8/10, 회색(대비 60/150)
+        20px 가 5/10 → 9/10, 큰 태그·시간은 그대로. 16h5 는 sharpen 에서 드물게 엉뚱한 ID 가 나오니 36h11 권장."""
         if family not in _CV_DICT:
             raise ValueError(f"지원하지 않는 계열: {family}")
-        self.family, self.min_margin, self.decimate = family, min_margin, decimate
+        self.family, self.min_margin, self.decimate, self.sharpen = family, min_margin, decimate, sharpen
         self._pupil = None
         if backend in ("auto", "pupil"):
             try:
                 from pupil_apriltags import Detector
 
                 # pupil-apriltags 는 tag36h10 을 모른다 → OpenCV 로
-                self._pupil = Detector(families=family, nthreads=2, quad_decimate=decimate, refine_edges=True)
+                self._pupil = Detector(families=family, nthreads=2, quad_decimate=decimate, refine_edges=True,
+                                       decode_sharpening=sharpen)
             except Exception:  # noqa: BLE001  ImportError 또는 미지원 계열
                 if backend == "pupil":
                     raise
@@ -497,8 +506,10 @@ class ShapeTracker:
 class Pipeline:
     """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다. track=True 면 도형을 프레임 간 추적해 검출률을 붙인다."""
 
-    def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0):
-        self.backend, self.max_width, self.tag_decimate = backend, max_width, tag_decimate
+    def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0,
+                 tag_sharpen: float = 1.0, upscale: float = 1.0):
+        self.backend, self.max_width, self.tag_decimate, self.tag_sharpen = backend, max_width, tag_decimate, tag_sharpen
+        self.upscale = upscale  # > 1 이면 max_width 대신 그 배로 키워서 검출
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
         self.tracker = ShapeTracker() if track else None
@@ -509,10 +520,11 @@ class Pipeline:
         res = DetResult()
         if not (tags or shapes):
             return res
-        small, scale = prepare(gray, self.max_width)
+        small, scale = prepare(gray, self.max_width, self.upscale)
         if tags:
-            if self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate:
-                self._tag = AprilTagDetector(family, self.backend, decimate=self.tag_decimate)
+            if (self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate
+                    or self._tag.sharpen != self.tag_sharpen):
+                self._tag = AprilTagDetector(family, self.backend, decimate=self.tag_decimate, sharpen=self.tag_sharpen)
             res.tags, res.rejected = self._tag.detect(small, invert, scale)
             res.backend = self._tag.backend
         if shapes:
@@ -550,22 +562,24 @@ class DetectWorker:
         return self._busy
 
     def submit(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
-               shape_options: ShapeOptions | None = None, max_width: int = 1280, tag_decimate: float = 1.0) -> bool:
+               shape_options: ShapeOptions | None = None, max_width: int = 1280, tag_decimate: float = 1.0,
+               tag_sharpen: float = 1.0, upscale: float = 1.0) -> bool:
         """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다."""
+        job = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale)
         if self._thread is None:
-            self._run(gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate)
+            self._run(*job)
             return True
         with self._cv:
             if self._busy or self._pending is not None:
                 self.skipped += 1
                 return False
-            self._pending = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate)
+            self._pending = job
             self._cv.notify()
         return True
 
-    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate) -> None:
+    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale) -> None:
         self.pipeline.max_width = max_width or 10**9
-        self.pipeline.tag_decimate = tag_decimate
+        self.pipeline.tag_decimate, self.pipeline.tag_sharpen, self.pipeline.upscale = tag_decimate, tag_sharpen, upscale
         self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options)
 
     def _loop(self) -> None:
