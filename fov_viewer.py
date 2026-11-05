@@ -36,7 +36,7 @@ import argparse
 import json
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -1239,7 +1239,7 @@ def main() -> None:
                 toast_until = time.time() + 2
                 view.reset_props()
             elif ch == ord("s"):
-                meta = {"device": op.summary}
+                meta = {"device": op.summary, "settings": asdict(flags)}  # 검출 설정 (family 등) 도 같이 남긴다
                 meta.update(view.snapshot_meta(op.st, distance) if op.kind == "orbbec" else view.snapshot_meta(op, fps))
                 stem = save_snapshot(args.out, canvas, view.last, meta)
                 toast, toast_until = f"saved {stem.name}.*", time.time() + 3
