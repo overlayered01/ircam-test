@@ -270,3 +270,33 @@ def test_tag_hamming_filter_accepts_one_wrong_bit():
     p.tag_hamming = 1
     res = p.run(img, tags=True, shapes=False)
     assert [(t.id, t.hamming) for t in res.tags] == [(7, 1)]
+
+
+def test_tag_tracker_confirms_after_consecutive_frames():
+    def tag(i, x, size=30):
+        c = np.array([[x, 100], [x + size, 100], [x + size, 100 + size], [x, 100 + size]], np.float64)
+        return det.TagDet(i, c, 0, 100.0)
+    tr = det.TagTracker()
+    assert tr.update([tag(1, 50)], confirm=3) == ([], 1)
+    assert tr.update([tag(1, 55)], confirm=3) == ([], 1)  # 조금 움직여도 같은 자리
+    out, pending = tr.update([tag(1, 60), tag(7, 400)], confirm=3)
+    assert [t.id for t in out] == [1] and pending == 1  # 1 은 3프레임째, 7 은 처음
+    out, _ = tr.update([tag(1, 60)], confirm=3)  # 7 이 한 프레임 빠짐 → 트랙 유지
+    assert [t.id for t in out] == [1] and {t.last.id for t in tr.tracks} == {1, 7}
+    tr.update([tag(1, 60)], confirm=3)  # 7 두 프레임째 없음 → 삭제
+    assert {t.last.id for t in tr.tracks} == {1}
+    assert tr.update([tag(1, 300)], confirm=3) == ([], 1)  # 멀리 뛰면 새 트랙
+    assert tr.update([], confirm=1) == ([], 0)
+
+
+def test_pipeline_tag_confirm_and_margin():
+    pytest.importorskip("pupil_apriltags")
+    img = tag_image("tag36h11", 4, px=30)
+    p = det.Pipeline(backend="pupil", track=True, tag_confirm=2)
+    r1 = p.run(img, tags=True, shapes=False)
+    assert r1.tags == [] and r1.tags_pending == 1 and "(+1 new)" in r1.summary()
+    r2 = p.run(img, tags=True, shapes=False)
+    assert [t.id for t in r2.tags] == [4] and r2.tags_pending == 0
+    p.tag_margin = 1000.0  # 어떤 태그도 못 넘는 margin
+    r3 = p.run(img, tags=True, shapes=False)
+    assert r3.tags == [] and r3.rejected == 1

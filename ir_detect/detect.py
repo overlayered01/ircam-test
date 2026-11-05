@@ -33,6 +33,8 @@ SHAPE_MODES = ("both", "filled", "outline")  # 채워진 도형 / 선으로 그�
 TAG_DECIMATES = (1.0, 2.0, 4.0)  # pupil quad_decimate: 사각형 후보 탐색 해상도 1/n (코너는 원본에서 보정)
 TAG_SHARPENS = (0.25, 0.5, 1.0)  # pupil decode_sharpening: 비트 읽기 전 선명화. 1.0 이면 작은(18~22px)·흐린·회색 태그 검출률 ↑, 시간 동일
 TAG_HAMMINGS = (0, 1, 2)  # 허용 비트 오류 수. 36h11(코드 간 거리 11)·25h9 는 1 까지 안전, 16h5(거리 5) 는 0 권장
+TAG_MARGINS = (10, 20, 40, 80)  # pupil decision_margin 최소. 제대로 보이는 태그는 100 이상, 오검출은 대개 10~40
+TAG_CONFIRMS = (1, 2, 3, 5)  # 같은 ID 가 같은 자리에 연속 n 프레임 나와야 인정 (1 = 바로)
 
 
 @dataclass
@@ -88,12 +90,14 @@ class DetResult:
     backend: str = ""
     rejected: int = 0  # 태그 후보 중 디코딩 실패 (OpenCV) / 필터로 떨어진 것 (pupil)
     shapes_rejected: int = 0  # 도형 후보 중 종류·정형·크기 조건으로 떨어진 것
+    tags_pending: int = 0  # TagTracker 에서 아직 confirm 프레임을 못 채운 태그 수
 
     def summary(self) -> str:
         parts = []
         if self.backend:
             ids = ",".join(str(t.id) for t in self.tags[:8]) + (",…" if len(self.tags) > 8 else "")
-            parts.append(f"tags {len(self.tags)}" + (f" [{ids}]" if self.tags else "") + (f" (-{self.rejected})" if self.rejected else ""))
+            parts.append(f"tags {len(self.tags)}" + (f" [{ids}]" if self.tags else "") + (f" (-{self.rejected})" if self.rejected else "")
+                         + (f" (+{self.tags_pending} new)" if self.tags_pending else ""))
         if self.shapes or self.shapes_rejected:
             counts: dict[str, int] = {}
             for s in self.shapes:
@@ -505,17 +509,74 @@ class ShapeTracker:
         return out
 
 
+class TagTracker:
+    """연속 프레임에서 같은 ID 가 같은 자리에 confirm 번 이어서 나와야 태그로 인정한다.
+
+    16h5 처럼 코드가 적은 계열은 배경 무늬가 한 프레임짜리 가짜 ID 로 읽히는 일이 있다. 진짜 태그는 매 프레임 같은 자리에
+    같은 ID 로 나오므로 두세 프레임만 이어서 보면 가짜가 걸러진다. 한 프레임 놓친 것은 봐주고(streak 유지), 두 프레임 연속
+    안 보이면 트랙을 지운다. 같은 자리 = 중심 거리가 태그 한 변 이하.
+    """
+
+    @dataclass
+    class Track:
+        last: TagDet
+        streak: int = 1  # 연속으로 보인 프레임 수
+        miss: int = 0
+
+    def __init__(self, max_miss: int = 1):
+        self.max_miss = max_miss
+        self.tracks: list[TagTracker.Track] = []
+
+    def reset(self) -> None:
+        self.tracks.clear()
+
+    def update(self, tags: list[TagDet], confirm: int = 1) -> tuple[list[TagDet], int]:
+        """이번 프레임 검출 목록 → (confirm 을 채운 태그, 아직 못 채운 수)."""
+        matched: set[int] = set()
+        out, pending = [], 0
+        for t in tags:
+            best, best_d = None, 0.0
+            for i, tr in enumerate(self.tracks):
+                if i in matched or tr.last.id != t.id:
+                    continue
+                d = float(np.hypot(tr.last.center[0] - t.center[0], tr.last.center[1] - t.center[1]))
+                if d <= max(tr.last.size_px, t.size_px) and (best is None or d < best_d):
+                    best, best_d = i, d
+            if best is None:
+                self.tracks.append(self.Track(t))
+                best = len(self.tracks) - 1
+            else:
+                tr = self.tracks[best]
+                tr.last, tr.streak, tr.miss = t, tr.streak + 1, 0
+            matched.add(best)
+            if self.tracks[best].streak >= confirm:
+                out.append(t)
+            else:
+                pending += 1
+        keep = []
+        for i, tr in enumerate(self.tracks):
+            if i not in matched:
+                tr.miss += 1
+                if tr.miss > self.max_miss:
+                    continue
+            keep.append(tr)
+        self.tracks = keep
+        return out, pending
+
+
 class Pipeline:
     """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다. track=True 면 도형을 프레임 간 추적해 검출률을 붙인다."""
 
     def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0,
-                 tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0):
+                 tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0, tag_margin: float = 10.0,
+                 tag_confirm: int = 1):
         self.backend, self.max_width, self.tag_decimate, self.tag_sharpen = backend, max_width, tag_decimate, tag_sharpen
         self.upscale = upscale  # > 1 이면 max_width 대신 그 배로 키워서 검출
-        self.tag_hamming = tag_hamming
+        self.tag_hamming, self.tag_margin, self.tag_confirm = tag_hamming, tag_margin, tag_confirm
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
         self.tracker = ShapeTracker() if track else None
+        self.tag_tracker = TagTracker() if track else None
 
     def run(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
             shape_options: ShapeOptions | None = None) -> DetResult:
@@ -528,9 +589,13 @@ class Pipeline:
             if (self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate
                     or self._tag.sharpen != self.tag_sharpen):
                 self._tag = AprilTagDetector(family, self.backend, decimate=self.tag_decimate, sharpen=self.tag_sharpen)
-            self._tag.max_hamming = self.tag_hamming
+            self._tag.max_hamming, self._tag.min_margin = self.tag_hamming, self.tag_margin
             res.tags, res.rejected = self._tag.detect(small, invert, scale)
             res.backend = self._tag.backend
+            if self.tag_tracker is not None:
+                res.tags, res.tags_pending = self.tag_tracker.update(res.tags, self.tag_confirm)
+        elif self.tag_tracker is not None:
+            self.tag_tracker.reset()
         if shapes:
             res.shapes, res.shapes_rejected = self._shape.detect(small, invert, scale, shape_options)
             if self.tracker is not None:
@@ -566,10 +631,10 @@ class DetectWorker:
         return self._busy
 
     def submit(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
-               shape_options: ShapeOptions | None = None, max_width: int = 1280, tag_decimate: float = 1.0,
-               tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0) -> bool:
-        """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다."""
-        job = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale, tag_hamming)
+               shape_options: ShapeOptions | None = None, max_width: int = 1280, **params) -> bool:
+        """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다.
+        params 는 Pipeline 속성(tag_decimate, tag_sharpen, upscale, tag_hamming, tag_margin, tag_confirm)."""
+        job = (gray, tags, shapes, family, invert, shape_options, max_width, params)
         if self._thread is None:
             self._run(*job)
             return True
@@ -581,11 +646,10 @@ class DetectWorker:
             self._cv.notify()
         return True
 
-    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale,
-             tag_hamming) -> None:
+    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, params) -> None:
         self.pipeline.max_width = max_width or 10**9
-        self.pipeline.tag_decimate, self.pipeline.tag_sharpen, self.pipeline.upscale = tag_decimate, tag_sharpen, upscale
-        self.pipeline.tag_hamming = tag_hamming
+        for k, v in params.items():
+            setattr(self.pipeline, k, v)
         self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options)
 
     def _loop(self) -> None:
