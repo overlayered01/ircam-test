@@ -169,6 +169,7 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
 | Tag decimate | 1 / 2 / 4 | 태그 후보 탐색 해상도 1/n. 2 면 4~6배 빠르고(DMK 1280 폭 46 → 11~18 ms) 최소 태그 크기가 2배(36h11 18 → 36 px) |
 | Tag sharpen | 0.25 / 0.5 / 1 | 비트 읽기 전 선명화 (pupil decode_sharpening). 1 이 기본: 18 px 36h11 0/10 → 8/10, 회색 20 px 5/10 → 9/10, 시간 동일 |
+| Tag max hamming | 0 / 1 / 2 | 허용 비트 오류. 흐린 작은 태그는 한 비트가 틀려 hamming 1 로 떨어진다. 36h11·25h9 는 1 까지 안전, 16h5 는 0 |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
 | Shape mode | both / filled / outline | filled = 속이 찬 도형, outline = 선으로 그린 도형(펜 선, 두 획 십자). both 는 둘 다 |
@@ -182,6 +183,8 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
   ② Tag decimate = 1, Tag sharpen = 1, ③ 노출 고정 + 게인 낮춰 노이즈 줄이기, 포커스 (패널 focus 값이 최대가 되게 렌즈 링),
   ④ 인쇄: 레이저 토너는 IR 에서 회색으로 보이는 경우가 많다 — 잉크젯 검정(안료) 이나 무광 검정지에 흰 테두리 한 칸 이상,
   ⑤ 그래도 모자라면 16h5 (14 px, ID 30개, 오검출 주의) 또는 더 긴 렌즈. Mega 에서는 Detect width 2x.
+  DMK 모드도 중요하다: 1280x960 은 2448x2048 의 절반 픽셀이라 같은 태그가 절반 크기로 보인다 (실측: 2448 에서 40 px 짜리가 20 px).
+  작은 태그는 **Mode 2448x2048 + Detect width full** 로.
 - 검출은 별도 스레드에서 돈다 (`det.DetectWorker`). 검출이 프레임 간격보다 오래 걸리면 그동안 들어온 프레임은 검출만 건너뛰고
   영상은 카메라 fps 그대로 흐른다 (결과는 한두 프레임 늦게 따라온다). 같은 스레드에서 돌리던 때는 DMK 2448px 에서 검출 46 ms 가
   프레임 41 ms 를 넘어 정확히 한 장 걸러 한 장씩 버려졌고(11.7 fps), 장면 따라 검출 시간이 달라져 간격이 튀었다.

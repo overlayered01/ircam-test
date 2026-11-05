@@ -255,3 +255,18 @@ def test_prepare_upscale_and_coords():
     assert [t.id for t in res.tags] == [5]
     cx, cy = res.tags[0].center
     assert abs(cx - img.shape[1] / 2) < 3 and abs(cy - img.shape[0] / 2) < 3  # 원본 좌표
+
+
+def test_tag_hamming_filter_accepts_one_wrong_bit():
+    pytest.importorskip("pupil_apriltags")
+    px, margin = 20, 4
+    img = tag_image("tag36h11", 7, px=px, margin=margin).copy()
+    r0 = (margin + 1) * px  # 테두리 안쪽 첫 데이터 셀 (0,0)
+    cell = img[r0:r0 + px, r0:r0 + px]
+    img[r0:r0 + px, r0:r0 + px] = 255 - cell  # 비트 하나 뒤집기
+    p = det.Pipeline(backend="pupil")
+    res = p.run(img, tags=True, shapes=False)
+    assert res.tags == [] and res.rejected == 1
+    p.tag_hamming = 1
+    res = p.run(img, tags=True, shapes=False)
+    assert [(t.id, t.hamming) for t in res.tags] == [(7, 1)]

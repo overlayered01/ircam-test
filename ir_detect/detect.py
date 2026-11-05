@@ -32,6 +32,7 @@ SHAPE_MIN_PX = (10, 20, 40, 80, 160)
 SHAPE_MODES = ("both", "filled", "outline")  # 채워진 도형 / 선으로 그린 도형 / 둘 다
 TAG_DECIMATES = (1.0, 2.0, 4.0)  # pupil quad_decimate: 사각형 후보 탐색 해상도 1/n (코너는 원본에서 보정)
 TAG_SHARPENS = (0.25, 0.5, 1.0)  # pupil decode_sharpening: 비트 읽기 전 선명화. 1.0 이면 작은(18~22px)·흐린·회색 태그 검출률 ↑, 시간 동일
+TAG_HAMMINGS = (0, 1, 2)  # 허용 비트 오류 수. 36h11(코드 간 거리 11)·25h9 는 1 까지 안전, 16h5(거리 5) 는 0 권장
 
 
 @dataclass
@@ -128,6 +129,7 @@ class AprilTagDetector:
         if family not in _CV_DICT:
             raise ValueError(f"지원하지 않는 계열: {family}")
         self.family, self.min_margin, self.decimate, self.sharpen = family, min_margin, decimate, sharpen
+        self.max_hamming = 0  # 흐린 작은 태그는 한 비트가 틀려 hamming 1 로 나온다 (Pipeline.tag_hamming 으로 바꾼다)
         self._pupil = None
         if backend in ("auto", "pupil"):
             try:
@@ -153,7 +155,7 @@ class AprilTagDetector:
         out, rejected = [], 0
         if self._pupil is not None:
             for d in self._pupil.detect(img):
-                if d.hamming != 0 or d.decision_margin < self.min_margin:
+                if d.hamming > self.max_hamming or d.decision_margin < self.min_margin:
                     rejected += 1
                     continue
                 out.append(TagDet(int(d.tag_id), np.asarray(d.corners, np.float64) * scale, int(d.hamming), float(d.decision_margin)))
@@ -507,9 +509,10 @@ class Pipeline:
     """메뉴 설정 → 검출기 묶음. 계열이 바뀌면 태그 검출기를 다시 만든다. track=True 면 도형을 프레임 간 추적해 검출률을 붙인다."""
 
     def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0,
-                 tag_sharpen: float = 1.0, upscale: float = 1.0):
+                 tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0):
         self.backend, self.max_width, self.tag_decimate, self.tag_sharpen = backend, max_width, tag_decimate, tag_sharpen
         self.upscale = upscale  # > 1 이면 max_width 대신 그 배로 키워서 검출
+        self.tag_hamming = tag_hamming
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
         self.tracker = ShapeTracker() if track else None
@@ -525,6 +528,7 @@ class Pipeline:
             if (self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate
                     or self._tag.sharpen != self.tag_sharpen):
                 self._tag = AprilTagDetector(family, self.backend, decimate=self.tag_decimate, sharpen=self.tag_sharpen)
+            self._tag.max_hamming = self.tag_hamming
             res.tags, res.rejected = self._tag.detect(small, invert, scale)
             res.backend = self._tag.backend
         if shapes:
@@ -563,9 +567,9 @@ class DetectWorker:
 
     def submit(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
                shape_options: ShapeOptions | None = None, max_width: int = 1280, tag_decimate: float = 1.0,
-               tag_sharpen: float = 1.0, upscale: float = 1.0) -> bool:
+               tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0) -> bool:
         """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다."""
-        job = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale)
+        job = (gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale, tag_hamming)
         if self._thread is None:
             self._run(*job)
             return True
@@ -577,9 +581,11 @@ class DetectWorker:
             self._cv.notify()
         return True
 
-    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale) -> None:
+    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, tag_decimate, tag_sharpen, upscale,
+             tag_hamming) -> None:
         self.pipeline.max_width = max_width or 10**9
         self.pipeline.tag_decimate, self.pipeline.tag_sharpen, self.pipeline.upscale = tag_decimate, tag_sharpen, upscale
+        self.pipeline.tag_hamming = tag_hamming
         self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options)
 
     def _loop(self) -> None:

@@ -131,6 +131,7 @@ class ViewFlags:
     detect_width: int = 1280  # 검출용 축소 폭 (0 = 원본 그대로). DMK 2448px 에서 작은 도형은 full 로
     tag_decimate: float = 1.0  # det.TAG_DECIMATES: 2 면 태그 검출 4~6배 빠름, 최소 태그 크기 2배
     tag_sharpen: float = 1.0  # det.TAG_SHARPENS: 작은·회색 태그 검출률 (시간 동일)
+    tag_hamming: int = 0  # det.TAG_HAMMINGS: 허용 비트 오류. 36h11 은 1 까지 무난
 
     @property
     def tags(self) -> bool:
@@ -150,6 +151,7 @@ DETECT_WIDTHS = ["640", "1280", "full", "2x"]  # 검출용 축소 폭. 2x = 원�
 DETECT_WIDTH_VALUES = (640, 1280, 0, -2)
 TAG_DECIMATES = [f"{v:g}" for v in det.TAG_DECIMATES]
 TAG_SHARPENS = [f"{v:g}" for v in det.TAG_SHARPENS]
+TAG_HAMMINGS = [str(v) for v in det.TAG_HAMMINGS]
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +237,7 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
         MenuRow("family", "Tag family", fams, fams.index(flags.family) if flags.family in fams else 0, g),
         MenuRow("tdec", "Tag decimate", TAG_DECIMATES, _nearest(list(det.TAG_DECIMATES), flags.tag_decimate), g),
         MenuRow("tsharp", "Tag sharpen", TAG_SHARPENS, _nearest(list(det.TAG_SHARPENS), flags.tag_sharpen), g),
+        MenuRow("thamm", "Tag max hamming", TAG_HAMMINGS, _nearest(list(det.TAG_HAMMINGS), flags.tag_hamming), g),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
         MenuRow("smode", "Shape mode", modes, modes.index(flags.shape_mode) if flags.shape_mode in modes else 0, g),
@@ -252,6 +255,7 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
         family=m.row("family").value,
         tag_decimate=det.TAG_DECIMATES[m.get("tdec")],
         tag_sharpen=det.TAG_SHARPENS[m.get("tsharp")],
+        tag_hamming=det.TAG_HAMMINGS[m.get("thamm")],
         invert=bool(m.get("invert")),
         shape_type=m.row("stype").value,
         shape_mode=m.row("smode").value,
@@ -952,7 +956,7 @@ def submit_detect(detw: det.DetectWorker, gray: np.ndarray, flags: ViewFlags) ->
     """검출 스레드에 이 프레임을 넘기고(바쁘면 건너뜀) 지금까지의 마지막 결과를 돌려준다."""
     detw.submit(gray, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options,
                 max(flags.detect_width, 0), flags.tag_decimate, flags.tag_sharpen,
-                2.0 if flags.detect_width == -2 else 1.0)
+                2.0 if flags.detect_width == -2 else 1.0, flags.tag_hamming)
     return detw.result
 
 
@@ -990,6 +994,8 @@ def main() -> None:
                     help="AprilTag quad_decimate. 2 = 4~6배 빠름, 최소 태그 크기 2배")
     ap.add_argument("--tag-sharpen", type=float, default=1.0, choices=det.TAG_SHARPENS,
                     help="AprilTag decode_sharpening. 1 = 작은·회색 태그 검출률 ↑ (기본)")
+    ap.add_argument("--tag-hamming", type=int, default=0, choices=det.TAG_HAMMINGS,
+                    help="허용 비트 오류 수. 36h11 은 1 까지 무난, 16h5 는 0")
     ap.add_argument("--exposure", type=float, help="DMK 노출 고정 (ms). 자동 노출을 끈다")
     ap.add_argument("--gain", type=float, help="DMK 게인 고정 (dB). 자동 게인을 끈다")
     args = ap.parse_args()
@@ -1034,7 +1040,7 @@ def main() -> None:
     menu: MenuState | None = None
     distance = args.distance
     flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width,
-                      tag_decimate=args.tag_decimate, tag_sharpen=args.tag_sharpen)
+                      tag_decimate=args.tag_decimate, tag_sharpen=args.tag_sharpen, tag_hamming=args.tag_hamming)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 
