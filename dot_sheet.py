@@ -7,6 +7,8 @@
     python dot_sheet.py cube                           # 8 cm 큐브 면 6개 (모서리 마커 + 가운데 그림 자리) → print/cube_faces.png + cube_face_*.png
     python dot_sheet.py cube --face 80 --dot 4 --picture 38 --edge 2 --faces 1 2 2s 3I 3L 3L,1,3L,1
     python dot_sheet.py cube --faces combos12 --stem cube_faces_12   # 모서리마다 점 1개 또는 2개, 16가지 조합 (1,1,1,1 … 2,2,2,2)
+    python dot_sheet.py cube --faces 1,1,1,1 1,1,1,2 1,1,2,1 1,2,1,1 2,1,1,1 --dot 3 4 5 6 8 --distance 2.7 2 --no-singles --stem cube_test
+        # 2.7 m 에 둘 큐브를 2 m 에서 시험: 치수를 2/2.7 배로 줄인 시트를 점 지름(실제 3~8 mm)마다 한 장씩
 
 마커 종류 (간격은 점 지름 d 의 배수. 뷰어 Dot group gap 기본 3.5 d 안에 들어가고, 마커끼리는 6 d 이상 떨어뜨린다):
     1   : 점 하나. 위치만.
@@ -229,30 +231,36 @@ def expand_faces(faces: list[str]) -> list[str]:
 
 
 def sheet_cube(faces: list[str], face_mm: float, dot_mm: float, picture_mm: float, margin_mm: float | None,
-               gap_d: float, dpi: int, out: Path, stem: str = "cube_faces") -> tuple[list[Path], float]:
-    """A4 에 면들을 배치해 저장하고, 면마다 점만 그린 낱장 PNG(정확히 face_mm)도 저장한다. (경로들, 그림↔점 최소 거리 mm)."""
+               gap_d: float, dpi: int, out: Path, stem: str = "cube_faces", scale: float = 1.0,
+               singles: bool = True) -> tuple[list[Path], float]:
+    """A4 에 면들을 배치해 저장하고, 면마다 점만 그린 낱장 PNG(정확히 face_mm)도 저장한다. (경로들, 그림↔점 최소 거리 mm).
+    scale < 1 이면 모든 치수를 그 배로 줄여 그린다 (실제 거리 대신 가까이서 시험할 때: 2.7 m 짜리를 2 m 에서 → 2/2.7).
+    라벨과 출력은 실제 치수와 줄인 치수를 같이 적는다. 그림↔점 거리 검사는 실제 치수 기준(비율은 같다)."""
     px = dpi / 25.4
-    face, d, picture = face_mm * px, dot_mm * px, picture_mm * px
-    margin = (margin_mm if margin_mm is not None else 2.0) * px  # 면 가장자리 ↔ 점 가장자리
-    pg = Pages(dpi, f"Cube faces  {face_mm:g} mm  dot {dot_mm:g} mm  picture {picture_mm:g} mm  @ {dpi} dpi  (print at 100%, cut on gray line)")
+    k = scale * px
+    face, d, picture = face_mm * k, dot_mm * k, picture_mm * k
+    margin = (margin_mm if margin_mm is not None else 2.0) * k  # 면 가장자리 ↔ 점 가장자리
+    sc = f"  x{scale:.3g} (face {face_mm * scale:.1f} mm, dot {dot_mm * scale:.2f} mm)" if scale != 1.0 else ""
+    pg = Pages(dpi, f"Cube faces  {face_mm:g} mm  dot {dot_mm:g} mm  picture {picture_mm:g} mm{sc}  @ {dpi} dpi  (print at 100%)")
     worst = float("inf")
     paths = []
     for i, spec in enumerate(faces):
         # 면 사이는 6 d 이상 (이웃 면 모서리 마커끼리 묶이지 않게: 8 mm 로 붙이면 12 mm = 3 d 라 한 덩어리가 된다) → 보통 한 장에 4면
         gap = max(8 * px, 6 * d + 2 * margin)
         x, y = pg.place(face, face, gap, gap)
-        label = f"face {i + 1}: {spec}"
+        label = f"face {i + 1}: {spec}" + (f"  d{dot_mm:g}" if scale != 1.0 else "")
         dots = draw_face(pg.img, int(x), int(y), spec, face, margin, d, picture, label)
-        clear = picture_clearance(dots, face, picture) / px
+        clear = picture_clearance(dots, face, picture) / k
         worst = min(worst, clear)
-        single = np.full((int(round(face)), int(round(face))), 255, np.uint8)  # 인쇄소용 낱장: 점만
-        draw_face(single, 0, 0, spec, face, margin, d, picture, label, guides=False)
-        path = out / f"{stem.replace('cube_faces', 'cube_face')}_{i + 1}_{spec.replace(',', '-')}.png"
-        cv2.imwrite(str(path), single)
-        paths.append(path)
-        print(f"{path}  {single.shape[1]}x{single.shape[0]} ({face_mm:g} mm)  picture-dot {clear:.1f} mm")
+        if singles:
+            single = np.full((int(round(face)), int(round(face))), 255, np.uint8)  # 인쇄소용 낱장: 점만
+            draw_face(single, 0, 0, spec, face, margin, d, picture, label, guides=False)
+            path = out / f"{stem.replace('cube_faces', 'cube_face')}_{i + 1}_{spec.replace(',', '-')}.png"
+            cv2.imwrite(str(path), single)
+            paths.append(path)
+            print(f"{path}  {single.shape[1]}x{single.shape[0]} ({face_mm * scale:g} mm)  picture-dot {clear:.1f} mm")
     need = gap_d * dot_mm
-    print(f"그림 상자 ↔ 점 최소 거리 {worst:.1f} mm, 필요 ≥ {need:.1f} mm (Dot group gap {gap_d:g} × {dot_mm:g} mm)"
+    print(f"[{stem}] 그림 상자 ↔ 점 최소 거리 {worst:.1f} mm, 필요 ≥ {need:.1f} mm (Dot group gap {gap_d:g} × {dot_mm:g} mm)"
           + ("" if worst >= need else "  <- 모자람: 그림을 줄이거나(--picture) 점을 줄이거나 그림 모서리를 밝게"))
     return paths + pg.save(out, stem), worst
 
@@ -269,7 +277,10 @@ def main() -> None:
     ap.add_argument("--faces", nargs="+", default=["1", "2", "2s", "3I", "3L", "3L,1,3L,1"],
                     help="cube: 면마다 마커. 'kind' = 네 모서리 같은 마커, 'TL,TR,BR,BL' = 모서리별 (- 는 비움)")
     ap.add_argument("--face", type=float, default=80.0, help="cube: 한 면 mm")
-    ap.add_argument("--dot", type=float, default=4.0, help="cube: 점 지름 mm")
+    ap.add_argument("--dot", type=float, nargs="+", default=[4.0], help="cube: 점 지름 mm (여러 개면 지름마다 시트, stem 에 _d{mm} 붙음)")
+    ap.add_argument("--distance", type=float, nargs=2, metavar=("REAL_M", "TEST_M"), default=None,
+                    help="cube: 실제 거리와 시험 거리 (m). 치수를 TEST/REAL 배로 줄여 가까이서 실제 거리처럼 보이게 (예 2.7 2)")
+    ap.add_argument("--no-singles", action="store_true", help="cube: 낱장 PNG 는 만들지 않음 (시험 시트만)")
     ap.add_argument("--picture", type=float, default=38.0, help="cube: 가운데 그림 상자 한 변 mm")
     ap.add_argument("--edge", type=float, default=2.0, help="cube: 면 가장자리 ↔ 점 가장자리 mm")
     ap.add_argument("--gap", type=float, default=3.5, help="cube: 뷰어 Dot group gap (지름 배수) — 그림 간격 검사용")
@@ -281,7 +292,10 @@ def main() -> None:
     elif a.sheet == "sizes":
         sheet_sizes(a.kinds, a.sizes, a.grays, a.dpi, a.out)
     else:
-        sheet_cube(expand_faces(a.faces), a.face, a.dot, a.picture, a.edge, a.gap, a.dpi, a.out, a.stem)
+        scale = a.distance[1] / a.distance[0] if a.distance else 1.0
+        for dot in a.dot:
+            stem = a.stem + (f"_d{dot:g}" if len(a.dot) > 1 else "")
+            sheet_cube(expand_faces(a.faces), a.face, dot, a.picture, a.edge, a.gap, a.dpi, a.out, stem, scale, not a.no_singles)
 
 
 if __name__ == "__main__":
