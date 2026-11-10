@@ -632,7 +632,9 @@ class DotDetector:
         min_d = o.min_px / scale  # 검출 영상 픽셀
         max_d = max(min_d * 2, w * o.max_px_frac)
         mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
-        src = cv2.GaussianBlur(gray, (3, 3), 0) if min_d >= 5 else gray
+        # 3x3 블러는 항상: 게인을 올린 DMK 영상(잡음 σ≈10)은 블러 없이는 점 경계가 너덜거려 모양 검사에서 전부 떨어진다
+        # (실측 1280x960, 게인 28 dB: 블러 없이 0개 → 블러로 23개). 4 px 점도 블러 뒤에 그대로 잡힌다 (합성 검증)
+        src = cv2.GaussianBlur(gray, (3, 3), 0)
         # 국소 이진화 창 두 개의 합집합: 큰 창(4 × 최대 점)은 큰 점용, 작은 창(12 × 최소 점)은 종이 가장자리 근처 작은 점용 —
         # 큰 창 하나만 쓰면 종이 밖 어두운 배경이 국소 평균을 끌어내려 종이 가장자리 20 % 안쪽의 회색 점이 사라진다
         c = -10 if invert else 10
@@ -644,7 +646,7 @@ class DotDetector:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
         min_area = np.pi * (min_d / 2) ** 2 * 0.5
         max_area = np.pi * (max_d / 2) ** 2 * 1.3
-        g = gray.astype(np.float32)
+        g = src.astype(np.float32)  # 2단계(대비·중간 밝기·가중 중심)도 블러된 영상으로
         k3 = np.ones((3, 3), np.uint8)
         out: list[Dot] = []
         rejected = 0
@@ -711,11 +713,14 @@ class DotDetector:
                 if mom["m00"] <= 0:
                     continue
                 cx, cy = x0 + mom["m10"] / mom["m00"], y0 + mom["m01"] / mom["m00"]
-                eff_area = mom["m00"] / max(contrast, 1.0)
+                # 유효 면적 = 어두워진 양의 합 / 점 핵심 대비. 핵심 대비는 (블러된) 최솟값으로: '진한 절반 평균' 을 쓰면 잡음·흐림으로
+                # 대비가 2/3 로 낮게 잡혀 지름이 1.2 배 부풀고, 그러면 묶기 거리와 2s 크기 비가 틀어진다 (실측 FWHM 10 px 를 12 px 로 잼)
+                peak = float(outside - roi[m2 > 0].min()) if not invert else float(roi[m2 > 0].max() - outside)
+                eff_area = mom["m00"] / max(peak, contrast, 1.0)
                 diam = 2 * np.sqrt(eff_area / np.pi)
                 if diam < min_d * 0.85:
                     continue
-                out.append(Dot(((cx + 0.5) * scale, (cy + 0.5) * scale), diam * scale, eff_area * scale * scale, float(circ), float(contrast)))
+                out.append(Dot(((cx + 0.5) * scale, (cy + 0.5) * scale), diam * scale, eff_area * scale * scale, float(circ), float(peak)))
         return out, rejected
 
 
