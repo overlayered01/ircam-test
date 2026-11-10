@@ -32,6 +32,7 @@ def main() -> int:
     ap.add_argument("--dot-min", type=int, default=4, help="점 지름 최소 (픽셀)")
     ap.add_argument("--dot-gap", type=float, default=3.5, help="같은 마커로 묶는 거리 (점 지름 배수)")
     ap.add_argument("--dot-min-count", type=int, default=1, help="2 = 1점 마커 무시")
+    ap.add_argument("--dot-max-count", type=int, default=3, help="한 마커 최대 점 수 (큐브 면은 2)")
     ap.add_argument("--denoise", default="off", choices=["off", "auto"], help="auto = 잡음·점 크기에 맞춘 블러")
     ap.add_argument("--shape-type", default="all", choices=det.SHAPE_TYPES, help="찾을 도형 종류")
     ap.add_argument("--regular", action="store_true", help="정형(정삼각형·정사각형·정십자·원…)만")
@@ -57,7 +58,7 @@ def main() -> int:
             gray = to_u8(gray)
         opts = det.ShapeOptions(a.shape_type, a.regular, a.tol, a.min_px, a.shape_mode)
         res = pipe.run(gray, tags=not a.no_tags, shapes=a.shapes, family=a.family, invert=a.invert, shape_options=opts,
-                       dots=a.dots, dot_options=det.DotOptions(a.dot_min, a.dot_gap, a.dot_min_count))
+                       dots=a.dots, dot_options=det.DotOptions(a.dot_min, a.dot_gap, a.dot_min_count, a.dot_max_count))
         print(f"{f.name}: {res.summary()}")
         for t in res.tags:
             print(f"   tag {t.id:4d}  center=({t.center[0]:.0f},{t.center[1]:.0f})  size={t.size_px:.0f}px"

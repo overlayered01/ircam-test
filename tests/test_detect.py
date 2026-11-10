@@ -470,3 +470,27 @@ def test_estimate_noise_and_denoise_modes():
     assert res.denoise == "avg1"
     p.denoise = "off"
     assert p.run(frame, tags=False, shapes=False, dots=True).denoise == "" and not p._avg
+
+
+def test_split_crowded_groups_into_markers():
+    def dot(x, y, d=10.0):
+        return det.Dot((x, y), d, np.pi * d * d / 4, 1.0, 100.0)
+    # 외톨이 점 + 옆 면의 2점(간격 25 = 2.5 d) 이 30 (3 d) 떨어져 한 그룹이 된 경우 → 3I 모양이 아니므로 2 + 1
+    g = [dot(0, 0), dot(30, 0), dot(55, 0)]
+    assert sorted(len(c) for c in det.split_group(g, 3)) == [1, 2]
+    # 진짜 3I (1:2) 와 진짜 L 은 그대로
+    assert len(det.split_group([dot(0, 0), dot(15, 0), dot(45, 0)], 3)) == 1
+    assert len(det.split_group([dot(0, 0), dot(25, 0), dot(0, 25)], 3)) == 1
+    # 옛 큐브 시트의 가운데: 네 면 모서리 (1점, 2점, 2점, 1점) 가 12 mm 간격으로 모인 6점 덩어리 → 1 + 2 + 2 + 1
+    s = 10.0  # 1 mm = 1 px 로 가정, d = 4
+    six = [dot(0, 0, 4), dot(12, 0, 4), dot(22, 0, 4), dot(0, 12, 4), dot(10, 12, 4), dot(22, 12, 4)]
+    # max 3 이면 외톨이 점 + 옆 2점이 팔 길이 12/10 의 L 로 읽힐 수 있어 [1, 2, 3] 도 나온다 — 큐브 면처럼 3점 마커가 없으면 max 2 로
+    assert sorted(len(c) for c in det.split_group(six, 3)) in ([1, 1, 2, 2], [1, 2, 3])
+    assert sorted(len(c) for c in det.split_group(six, 2)) == [1, 1, 2, 2]
+    # 검출기 전체: 합성 영상에 두 마커를 3 d 간격으로 붙여 놓아도 각각 읽힌다
+    img = np.full((300, 400), 230, np.uint8)
+    for x, y in ((100, 150), (125, 150), (160, 150), (185, 150)):  # 2점 + 2점, 마커 사이 35 px = 3.5 d
+        cv2.circle(img, (x, y), 5, 20, -1, cv2.LINE_AA)
+    cv2.circle(img, (300, 150), 5, 20, -1, cv2.LINE_AA)
+    markers, _ = det.DotDetector().detect(img)
+    assert sorted(m.kind for m in markers) == ["1", "2", "2"]

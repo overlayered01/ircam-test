@@ -484,6 +484,7 @@ DOT_MIN_PX = (3, 4, 6, 8, 12)  # 점 지름 최소 (원본 픽셀). DMK 2448 에
 DOT_GAPS = (2.5, 3.5, 5.0)  # 같은 마커로 묶는 중심 간 거리 상한 (점 지름 배수). 마커끼리는 이보다 멀리 둔다
 DOT_MAX_COUNT = 3
 DOT_MIN_COUNTS = (1, 2)  # 1점 마커도 받을지. 멀리서 글자 조각·얼룩이 1점으로 읽히면 2 로
+DOT_MAX_COUNTS = (2, 3)  # 한 마커의 최대 점 수. 큐브 면(모서리 1·2점)처럼 3점 마커를 안 쓰면 2 — 이웃 마커 점이 우연히 L 로 묶이는 일이 없어진다
 
 
 @dataclass(frozen=True)
@@ -491,7 +492,7 @@ class DotOptions:
     min_px: int = 4  # 점 지름 최소 (원본 픽셀)
     gap: float = 3.5  # 묶기 거리 (지름 배수)
     min_count: int = 1  # 이보다 적은 점 그룹(1점)은 버린다
-    max_count: int = DOT_MAX_COUNT  # 이보다 많이 뭉친 그룹은 버린다 (글자 등)
+    max_count: int = DOT_MAX_COUNT  # 한 마커의 최대 점 수. 더 뭉친 그룹은 긴 변부터 잘라 나눈다 (split_group)
     max_px_frac: float = 0.05  # 점 지름 최대 = 영상 폭 × 이 값 (2448 → 122 px, 640 → 32 px)
     min_circularity: float = 0.75  # 4πA/P². 원 1.0(흐리고 작으면 0.83~), 정사각형 0.785, 글자 획은 대개 0.3 이하
     min_solidity: float = 0.88  # 면적 / 볼록 껍질 면적. 찬 점 ≈ 1, 글자(B·A)·고리(O) 는 0.5~0.7
@@ -616,6 +617,72 @@ def group_dots(dots: list[Dot], gap: float, size_ratio: float) -> list[list[Dot]
     return list(groups.values())
 
 
+def marker_shape_ok(dots: list[Dot]) -> bool:
+    """3점 그룹이 우리가 인쇄하는 마커 모양인지: 3I 는 간격 1:2 (비 0.35~0.65), 3L 은 두 팔이 비슷하고(0.7~1.4) 꼭짓점 내각 70~110°.
+    이웃 마커의 점이 우연히 붙어 생긴 3점(예: 외톨이 점 + 옆 면의 2점, 간격 3 d 와 2.5 d)은 둘 다 아니라서 갈라진다. 1·2점은 항상 OK."""
+    if len(dots) != 3:
+        return True
+    m = classify_dots(dots)
+    pts = np.array([d.center for d in dots], float)
+    dist = {(i, j): float(np.linalg.norm(pts[i] - pts[j])) for i in range(3) for j in range(i + 1, 3)}
+    (p, q), pq = max(dist.items(), key=lambda kv: kv[1])
+    mid = 3 - p - q
+    a, b = dist[tuple(sorted((p, mid)))], dist[tuple(sorted((mid, q)))]
+    if m.kind == "3I":
+        return 0.35 <= min(a, b) / max(a, b) <= 0.65
+    arms = sorted(dist[k] for k in dist)[:2]  # 꼭짓점에서 나가는 두 변 = 짧은 두 변
+    if not 0.7 <= arms[0] / arms[1] <= 1.4:
+        return False
+    cos_c = (arms[0] ** 2 + arms[1] ** 2 - pq ** 2) / (2 * arms[0] * arms[1])
+    return 70.0 <= float(np.degrees(np.arccos(np.clip(cos_c, -1, 1)))) <= 110.0
+
+
+def split_group(dots: list[Dot], max_count: int) -> list[list[Dot]]:
+    """묶인 점이 너무 많거나(> max_count) 3점인데 마커 모양이 아니면, 최소 신장 트리에서 가장 긴 변을 잘라 둘로 나누기를 반복한다.
+    마커 안의 점 간격(≤ 2.5~3 d)은 이웃 마커까지의 거리보다 짧으므로 긴 변부터 자르면 마커 단위로 갈라진다. 빽빽한 시트(면 사이 8 mm)에서
+    네 면의 모서리 점 6개가 한 덩어리로 묶여 통째로 버려지던 것을 각 모서리 마커로 되살린다."""
+    if len(dots) <= 1 or (len(dots) <= max_count and marker_shape_ok(dots)):
+        return [dots]
+    n = len(dots)
+    pts = np.array([d.center for d in dots], float)
+    edges = sorted(((float(np.linalg.norm(pts[i] - pts[j])), i, j) for i in range(n) for j in range(i + 1, n)))
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    tree = []
+    for w, i, j in edges:  # Kruskal
+        if find(i) != find(j):
+            parent[find(i)] = find(j)
+            tree.append((w, i, j))
+    tree.pop()  # 가장 긴 변 제거 → 두 성분
+    adj = {i: [] for i in range(n)}
+    for _, i, j in tree:
+        adj[i].append(j)
+        adj[j].append(i)
+    seen, comps = set(), []
+    for s0 in range(n):
+        if s0 in seen:
+            continue
+        stack, comp = [s0], []
+        while stack:
+            k = stack.pop()
+            if k in seen:
+                continue
+            seen.add(k)
+            comp.append(dots[k])
+            stack.extend(adj[k])
+        comps.append(comp)
+    out = []
+    for c in comps:
+        out += split_group(c, max_count)
+    return out
+
+
 class DotDetector:
     """인쇄한 검정 점(invert 면 밝은 점)을 찾아 1·2·3점 마커로 묶는다.
 
@@ -633,10 +700,11 @@ class DotDetector:
         dots, rejected = self._find_dots(gray, invert, scale, o)
         markers: list[DotMarker] = []
         for g in group_dots(dots, o.gap, o.size_ratio):
-            if len(g) > o.max_count or len(g) < o.min_count:
-                rejected += len(g)
-                continue
-            markers.append(classify_dots(g))
+            for sub in split_group(g, o.max_count):
+                if len(sub) < o.min_count:
+                    rejected += len(sub)
+                    continue
+                markers.append(classify_dots(sub))
         markers.sort(key=lambda m: (-m.count, m.center))
         return markers, rejected
 

@@ -137,6 +137,7 @@ class ViewFlags:
     dot_min: int = 4  # det.DOT_MIN_PX: 점 지름 최소 (원본 픽셀)
     dot_gap: float = 3.5  # det.DOT_GAPS: 같은 마커로 묶는 거리 (지름 배수)
     dot_min_count: int = 1  # det.DOT_MIN_COUNTS: 2 면 1점 마커 무시
+    dot_max_count: int = 3  # det.DOT_MAX_COUNTS: 큐브 면(1·2점만)은 2
     denoise: str = "off"  # det.DENOISES: 검출 영상 잡음 제거 (auto 블러 / 프레임 평균)
 
     @property
@@ -149,7 +150,7 @@ class ViewFlags:
 
     @property
     def dot_options(self) -> det.DotOptions:
-        return det.DotOptions(self.dot_min, self.dot_gap, self.dot_min_count)
+        return det.DotOptions(self.dot_min, self.dot_gap, self.dot_min_count, self.dot_max_count)
 
     @property
     def shapes(self) -> bool:
@@ -171,6 +172,7 @@ TAG_CONFIRMS = ["off" if v == 1 else str(v) for v in det.TAG_CONFIRMS]
 DOT_MINS = [str(v) for v in det.DOT_MIN_PX]
 DOT_GAPS = [f"{v:g}x" for v in det.DOT_GAPS]
 DOT_MIN_COUNTS = [str(v) for v in det.DOT_MIN_COUNTS]
+DOT_MAX_COUNTS = [str(v) for v in det.DOT_MAX_COUNTS]
 DENOISES = list(det.DENOISES)
 
 
@@ -265,6 +267,7 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
         MenuRow("dmin", "Dot min px", DOT_MINS, _nearest(list(det.DOT_MIN_PX), flags.dot_min), g),
         MenuRow("dgap", "Dot group gap", DOT_GAPS, _nearest(list(det.DOT_GAPS), flags.dot_gap), g),
         MenuRow("dcnt", "Dot min count", DOT_MIN_COUNTS, _nearest(list(det.DOT_MIN_COUNTS), flags.dot_min_count), g),
+        MenuRow("dmax", "Dot max count", DOT_MAX_COUNTS, _nearest(list(det.DOT_MAX_COUNTS), flags.dot_max_count), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
         MenuRow("smode", "Shape mode", modes, modes.index(flags.shape_mode) if flags.shape_mode in modes else 0, g),
         MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular), g),
@@ -289,6 +292,7 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
         dot_min=det.DOT_MIN_PX[m.get("dmin")],
         dot_gap=det.DOT_GAPS[m.get("dgap")],
         dot_min_count=det.DOT_MIN_COUNTS[m.get("dcnt")],
+        dot_max_count=det.DOT_MAX_COUNTS[m.get("dmax")],
         shape_type=m.row("stype").value,
         shape_mode=m.row("smode").value,
         shape_regular=bool(m.get("sreg")),
@@ -1041,6 +1045,7 @@ def main() -> None:
     ap.add_argument("--dot-min", type=int, default=4, choices=det.DOT_MIN_PX, help="점 지름 최소 (원본 픽셀)")
     ap.add_argument("--dot-gap", type=float, default=3.5, choices=det.DOT_GAPS, help="같은 마커로 묶는 거리 (점 지름 배수)")
     ap.add_argument("--dot-min-count", type=int, default=1, choices=det.DOT_MIN_COUNTS, help="2 = 1점 마커 무시")
+    ap.add_argument("--dot-max-count", type=int, default=3, choices=det.DOT_MAX_COUNTS, help="한 마커 최대 점 수. 큐브 면(1·2점)은 2")
     ap.add_argument("--denoise", default="off", choices=det.DENOISES,
                     help="검출 영상 잡음 제거: auto = 잡음·점 크기에 맞춘 블러, avg2/avg4 = 최근 프레임 평균 (정지 표적)")
     ap.add_argument("--exposure", type=float, help="DMK 노출 고정 (ms). 자동 노출을 끈다")
@@ -1089,7 +1094,7 @@ def main() -> None:
     flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width,
                       tag_decimate=args.tag_decimate, tag_sharpen=args.tag_sharpen, tag_hamming=args.tag_hamming,
                       tag_margin=args.tag_margin, tag_confirm=args.tag_confirm, dot_min=args.dot_min, dot_gap=args.dot_gap,
-                      dot_min_count=args.dot_min_count, denoise=args.denoise)
+                      dot_min_count=args.dot_min_count, dot_max_count=args.dot_max_count, denoise=args.denoise)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 
