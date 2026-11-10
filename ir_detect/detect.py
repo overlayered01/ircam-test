@@ -631,10 +631,16 @@ class DotDetector:
         h, w = gray.shape[:2]
         min_d = o.min_px / scale  # 검출 영상 픽셀
         max_d = max(min_d * 2, w * o.max_px_frac)
-        block = int(max(11, (int(max_d * 4) // 2) * 2 + 1))  # 점보다 충분히 큰 창: 점 주변 평균이 종이 밝기가 되게
         mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
         src = cv2.GaussianBlur(gray, (3, 3), 0) if min_d >= 5 else gray
-        bw = cv2.adaptiveThreshold(src, 255, cv2.ADAPTIVE_THRESH_MEAN_C, mode, block, -10 if invert else 10)
+        # 국소 이진화 창 두 개의 합집합: 큰 창(4 × 최대 점)은 큰 점용, 작은 창(12 × 최소 점)은 종이 가장자리 근처 작은 점용 —
+        # 큰 창 하나만 쓰면 종이 밖 어두운 배경이 국소 평균을 끌어내려 종이 가장자리 20 % 안쪽의 회색 점이 사라진다
+        c = -10 if invert else 10
+        big = int(max(11, (int(max_d * 4) // 2) * 2 + 1))
+        small_ = int(max(15, (int(min_d * 12) // 2) * 2 + 1))
+        bw = cv2.adaptiveThreshold(src, 255, cv2.ADAPTIVE_THRESH_MEAN_C, mode, big, c)
+        if small_ < big:
+            bw |= cv2.adaptiveThreshold(src, 255, cv2.ADAPTIVE_THRESH_MEAN_C, mode, small_, c)
         n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
         min_area = np.pi * (min_d / 2) ** 2 * 0.5
         max_area = np.pi * (max_d / 2) ** 2 * 1.3
