@@ -1,10 +1,11 @@
 """인쇄용 점 마커 시트 (A4, 300 dpi, 레이저 프린터, 100% 배율). 세 가지 시트를 만든다.
 
-    python dot_sheet.py markers                        # 다섯 마커 × 지름 4/6/8 mm → print/dots_markers.png
+    python dot_sheet.py markers                        # 다섯 마커 × 지름 4/6/8 mm → print/dots/dots_markers.png
     python dot_sheet.py markers --dots 3 4 5 6 8 10    # 지름을 바꿔서 (안 들어가면 _p2, _p3 …)
-    python dot_sheet.py sizes                          # 한 마커(3L)를 지름 2~12 mm 로 → print/dots_sizes.png
+    python dot_sheet.py sizes                          # 한 마커(3L)를 지름 2~12 mm 로 → print/dots/dots_sizes.png
     python dot_sheet.py sizes --kinds 1 3L --sizes 2 3 4 5 6 8 10 --grays 0 90 150   # 종류·크기·회색 농도 조합
-    python dot_sheet.py cube                           # 8 cm 큐브 면 6개 (모서리 마커 + 가운데 그림 자리) → print/cube_faces.png + cube_face_*.png
+    python dot_sheet.py cube                           # 8 cm 큐브 면 6개 (모서리 마커 + 가운데 그림 자리)
+                                                       #   → print/cube/<stem>/<stem>.png (A4) + single/cube_face_*.png (낱장)
     python dot_sheet.py cube --face 80 --dot 4 --picture 38 --edge 2 --faces 1 2 2s 3I 3L 3L,1,3L,1
     python dot_sheet.py cube --faces combos12 --stem cube_faces_12   # 모서리마다 점 1개 또는 2개, 16가지 조합 (1,1,1,1 … 2,2,2,2)
     python dot_sheet.py cube --faces 1,1,1,1 1,1,1,2 1,1,2,1 1,2,1,1 2,1,1,1 --dot 3 4 5 6 8 --distance 2.7 2 --no-singles --stem cube_test
@@ -255,7 +256,8 @@ def sheet_cube(faces: list[str], face_mm: float, dot_mm: float, picture_mm: floa
         if singles:
             single = np.full((int(round(face)), int(round(face))), 255, np.uint8)  # 인쇄소용 낱장: 점만
             draw_face(single, 0, 0, spec, face, margin, d, picture, label, guides=False)
-            path = out / f"{stem.replace('cube_faces', 'cube_face')}_{i + 1}_{spec.replace(',', '-')}.png"
+            (out / "single").mkdir(parents=True, exist_ok=True)
+            path = out / "single" / f"face_{i + 1}_{spec.replace(',', '-')}.png"
             cv2.imwrite(str(path), single)
             paths.append(path)
             print(f"{path}  {single.shape[1]}x{single.shape[0]} ({face_mm * scale:g} mm)  picture-dot {clear:.1f} mm")
@@ -269,7 +271,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sheet", nargs="?", default="markers", choices=["markers", "sizes", "cube"])
     ap.add_argument("--dpi", type=int, default=300)
-    ap.add_argument("--out", type=Path, default=Path("print"))
+    ap.add_argument("--out", type=Path, default=None, help="출력 폴더 (기본: markers/sizes → print/dots, cube → print/cube/<stem>)")
     ap.add_argument("--dots", type=float, nargs="+", default=[4.0, 6.0, 8.0], help="markers: 점 지름 mm")
     ap.add_argument("--kinds", nargs="+", default=["3L"], choices=list(MARKERS), help="sizes: 마커 종류")
     ap.add_argument("--sizes", type=float, nargs="+", default=[2, 3, 4, 5, 6, 8, 10, 12], help="sizes: 점 지름 mm")
@@ -286,6 +288,8 @@ def main() -> None:
     ap.add_argument("--gap", type=float, default=3.5, help="cube: 뷰어 Dot group gap (지름 배수) — 그림 간격 검사용")
     ap.add_argument("--stem", default="cube_faces", help="cube: 출력 파일 이름 앞부분 (낱장은 cube_face_N_spec.png)")
     a = ap.parse_args()
+    if a.out is None:
+        a.out = Path("print") / ("dots" if a.sheet != "cube" else f"cube/{a.stem}")
     a.out.mkdir(parents=True, exist_ok=True)
     if a.sheet == "markers":
         sheet_markers(a.dots, a.dpi, a.out)

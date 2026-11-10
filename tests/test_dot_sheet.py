@@ -46,7 +46,7 @@ def test_cube_faces_detected_and_clearance(tmp_path):
     faces = ["1", "2", "2s", "3I", "3L", "3L,1,3L,1"]
     paths, clearance = ds.sheet_cube(faces, 80.0, 4.0, 38.0, 2.0, 3.5, 300, tmp_path)
     assert clearance >= 3.5 * 4.0  # 그림 상자가 점과 묶이지 않는 거리
-    singles = [p for p in paths if p.name.startswith("cube_face_")]
+    singles = [p for p in paths if p.parent.name == "single"]
     assert len(singles) == 6 and cv2.imread(str(singles[0]), 0).shape == (945, 945)  # 80 mm @ 300 dpi
     total: dict[str, int] = {}
     for p in paths:

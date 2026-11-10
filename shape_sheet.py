@@ -1,6 +1,6 @@
 """인쇄용 도형 테스트 시트를 만든다 (A4, 300 dpi, 레이저 프린터 권장).
 
-    python shape_sheet.py                 # print/shapes_filled.png, print/shapes_outline.png
+    python shape_sheet.py                 # print/shapes/shapes_filled.png, shapes_outline.png
     python shape_sheet.py --size 60 --stroke 3 --out shapes
 
 한 장에 정삼각형 · 정사각형 · 정십자 · 원 · 정오각형 · 정육각형 여섯 개. filled 는 속이 찬 검정 도형(Shape mode filled),
@@ -80,7 +80,7 @@ def main() -> None:
     ap.add_argument("--size", type=float, default=60.0, help="도형 외접 사각형 한 변 (mm)")
     ap.add_argument("--stroke", type=float, default=2.0, help="outline 시트의 선 두께 (mm)")
     ap.add_argument("--dpi", type=int, default=300)
-    ap.add_argument("--out", type=Path, default=Path("print"))
+    ap.add_argument("--out", type=Path, default=Path("print/shapes"))
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     for kind, stroke in (("filled", 0.0), ("outline", a.stroke)):
