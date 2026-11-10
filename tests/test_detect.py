@@ -444,3 +444,29 @@ def test_classify_dots_equilateral_and_even_line_are_axis_only():
     assert line.kind == "3I" and line.sure and _ang_close(line.angle, 180)  # 외톨이(100) → 붙은 둘(0,30) 쪽
     big_small = det.classify_dots([dot(0, 0, 16), dot(0, 40, 10)])
     assert big_small.kind == "2s" and big_small.sure and _ang_close(big_small.angle, 90)
+
+
+def test_estimate_noise_and_denoise_modes():
+    rng = np.random.default_rng(0)
+    clean, exp = dots_image(12)
+    noisy = np.clip(clean.astype(np.float32) + rng.normal(0, 12, clean.shape), 0, 255).astype(np.uint8)
+    assert det.estimate_noise(clean) < 2 and 9 < det.estimate_noise(noisy) < 15
+    # auto: 잡음 σ≈12, 점 13 px (≥ 12) → 7x7 블러
+    p = det.Pipeline(backend="opencv", max_width=10**9, denoise="auto")
+    res = p.run(noisy, tags=False, shapes=False, dots=True, dot_options=det.DotOptions(min_px=12))
+    assert res.denoise == "blur7" and res.noise is not None and "noise" in res.summary()
+    # 점이 작으면(Dot min px 4) 자동 블러를 더 얹지 않는다
+    res = p.run(noisy, tags=False, shapes=False, dots=True, dot_options=det.DotOptions(min_px=4))
+    assert res.denoise == ""
+    # avg4: 서로 다른 잡음 프레임 4장을 평균하면 잡음이 절반 아래로, 마커는 그대로
+    p = det.Pipeline(backend="opencv", max_width=10**9, denoise="avg4")
+    for i in range(4):
+        frame = np.clip(clean.astype(np.float32) + np.random.default_rng(i).normal(0, 12, clean.shape), 0, 255).astype(np.uint8)
+        res = p.run(frame, tags=False, shapes=False, dots=True)
+    assert res.denoise == "avg4" and sorted(m.kind for m in res.dots) == sorted(exp)
+    assert det.estimate_noise(p._denoise(frame, 0.0, None, 1.0)[0]) < 8  # 4장 평균 → σ 12 → 6 (가장자리 몫 포함)
+    # 크기가 바뀌면 누적을 버린다; off 로 돌아가면 비운다
+    res = p.run(cv2.resize(frame, (400, 300)), tags=False, shapes=False, dots=True)
+    assert res.denoise == "avg1"
+    p.denoise = "off"
+    assert p.run(frame, tags=False, shapes=False, dots=True).denoise == "" and not p._avg

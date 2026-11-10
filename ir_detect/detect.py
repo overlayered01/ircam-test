@@ -36,6 +36,7 @@ TAG_SHARPENS = (0.25, 0.5, 1.0)  # pupil decode_sharpening: 비트 읽기 전 �
 TAG_HAMMINGS = (0, 1, 2)  # 허용 비트 오류 수. 36h11(코드 간 거리 11)·25h9 는 1 까지 안전, 16h5(거리 5) 는 0 권장
 TAG_MARGINS = (10, 20, 40, 80)  # pupil decision_margin 최소. 제대로 보이는 태그는 100 이상, 오검출은 대개 10~40
 TAG_CONFIRMS = (1, 2, 3, 5)  # 같은 ID 가 같은 자리에 연속 n 프레임 나와야 인정 (1 = 바로)
+DENOISES = ("off", "auto", "avg2", "avg4")  # 검출 영상 잡음 제거: auto = 잡음·점 크기에 맞춘 블러, avgN = 최근 N 프레임 평균 (정지 표적용)
 
 
 @dataclass
@@ -95,9 +96,13 @@ class DetResult:
     dots: list["DotMarker"] = field(default_factory=list)
     dots_rejected: int = 0  # 점 후보 중 모양·대비 조건으로 떨어진 것 + max_count 초과 그룹의 점
     dots_pending: int = 0  # 아직 confirm 프레임을 못 채운 마커 수
+    noise: float | None = None  # 검출 영상의 잡음 σ 추정 (8비트 단위, 밝은 절반 기준). DMK 실측: 게인 28 dB ≈ 6, 3 dB ≈ 3
+    denoise: str = ""  # 실제 적용한 잡음 제거 ("blur5", "avg3" …, 없으면 빈 문자열)
 
     def summary(self) -> str:
         parts = []
+        if self.noise is not None:
+            parts.append(f"noise {self.noise:.0f}" + (f" {self.denoise}" if self.denoise else ""))
         if self.dots or self.dots_rejected or self.dots_pending:
             kinds = ",".join(m.kind for m in self.dots[:8]) + (",…" if len(self.dots) > 8 else "")
             parts.append(f"dots {len(self.dots)}" + (f" [{kinds}]" if self.dots else "") + (f" (-{self.dots_rejected})" if self.dots_rejected else "")
@@ -115,6 +120,18 @@ class DetResult:
             if rates:
                 parts.append(f"hit {np.mean(rates) * 100:.0f}%")
         return "  ".join(parts) + f"  {self.ms:.0f}ms"
+
+
+def estimate_noise(gray: np.ndarray) -> float:
+    """잡음 σ 추정 (8비트 단위): 이웃 픽셀 차의 MAD. 4픽셀 간격으로 표본해 2448x2048 에서도 1 ms 안쪽. 가장자리가 섞여 조금 크게 나온다.
+    카메라 잡음은 밝을수록 크므로(샷 노이즈 × 게인) 밝은 절반의 픽셀만 본다 — 어두운 방의 밝은 종이에서 전체 중앙값을 쓰면 3 이 나오지만
+    종이 위 실제 잡음은 10 이다."""
+    a = gray[::4, ::4].astype(np.int16)
+    d = np.abs(a[:, 1:] - a[:, :-1])
+    bright = a[:, :-1] >= np.median(a)
+    if bright.sum() > 100:
+        d = d[bright]
+    return float(1.4826 * np.median(d) / np.sqrt(2))
 
 
 def prepare(gray: np.ndarray, max_width: int = 1280, upscale: float = 1.0) -> tuple[np.ndarray, float]:
@@ -844,10 +861,12 @@ class Pipeline:
 
     def __init__(self, backend: str = "auto", max_width: int = 1280, track: bool = False, tag_decimate: float = 1.0,
                  tag_sharpen: float = 1.0, upscale: float = 1.0, tag_hamming: int = 0, tag_margin: float = 10.0,
-                 tag_confirm: int = 1):
+                 tag_confirm: int = 1, denoise: str = "off"):
         self.backend, self.max_width, self.tag_decimate, self.tag_sharpen = backend, max_width, tag_decimate, tag_sharpen
         self.upscale = upscale  # > 1 이면 max_width 대신 그 배로 키워서 검출
         self.tag_hamming, self.tag_margin, self.tag_confirm = tag_hamming, tag_margin, tag_confirm
+        self.denoise = denoise  # DENOISES
+        self._avg: deque = deque(maxlen=4)  # avgN 용 최근 검출 영상 (float32)
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
         self._dot = DotDetector()
@@ -865,6 +884,8 @@ class Pipeline:
                     tr.reset()
             return res
         small, scale = prepare(gray, self.max_width, self.upscale)
+        res.noise = estimate_noise(small)
+        small, res.denoise = self._denoise(small, res.noise, dot_options, scale)
         if dots:
             res.dots, res.dots_rejected = self._dot.detect(small, invert, scale, dot_options)
             if self.dot_tracker is not None:
@@ -890,6 +911,30 @@ class Pipeline:
             self.tracker.reset()
         res.ms = (time.perf_counter() - t0) * 1000
         return res
+
+
+    def _denoise(self, small: np.ndarray, noise: float, dot_options: DotOptions | None, scale: float) -> tuple[np.ndarray, str]:
+        """검출 영상 잡음 제거. 태그·도형·점 모두 이 영상으로 검출한다.
+        - avgN: 최근 N 프레임(같은 크기) 평균. 잡음이 1/√N, 표적이 움직이면 번진다 → 정지한 큐브·종이용.
+        - auto: 잡음 σ 와 점 최소 크기(Dot min px)를 보고 5x5 / 7x7 블러. 점 지름이 커널의 2배는 돼야 뭉개지지 않으므로
+          σ ≥ 5 이고 점 ≥ 8 px 면 5x5, σ ≥ 10 이고 점 ≥ 12 px 면 7x7, 아니면 추가 블러 없음 (DotDetector 의 3x3 은 항상)."""
+        mode = self.denoise
+        if mode.startswith("avg"):
+            n = int(mode[3:])
+            if self._avg and self._avg[0].shape != small.shape:
+                self._avg.clear()
+            self._avg.append(small.astype(np.float32))
+            frames = list(self._avg)[-n:]
+            if len(frames) > 1:
+                return np.clip(np.mean(frames, axis=0) + 0.5, 0, 255).astype(np.uint8), f"avg{len(frames)}"
+            return small, "avg1"
+        self._avg.clear()
+        if mode == "auto":
+            min_d = (dot_options or DotOptions()).min_px / scale
+            k = 7 if noise >= 10 and min_d >= 12 else 5 if noise >= 5 and min_d >= 8 else 0
+            if k:
+                return cv2.GaussianBlur(small, (k, k), 0), f"blur{k}"
+        return small, ""
 
 
 class DetectWorker:
@@ -920,7 +965,7 @@ class DetectWorker:
                shape_options: ShapeOptions | None = None, max_width: int = 1280, dots: bool = False,
                dot_options: DotOptions | None = None, **params) -> bool:
         """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다.
-        params 는 Pipeline 속성(tag_decimate, tag_sharpen, upscale, tag_hamming, tag_margin, tag_confirm)."""
+        params 는 Pipeline 속성(tag_decimate, tag_sharpen, upscale, tag_hamming, tag_margin, tag_confirm, denoise)."""
         job = (gray, tags, shapes, family, invert, shape_options, max_width, dots, dot_options, params)
         if self._thread is None:
             self._run(*job)

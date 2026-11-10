@@ -59,6 +59,7 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | Regular only | on / off | 정삼각형·정사각형·정십자·원·정오각형·정육각형만 (rect 제외) |
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 도형 최소 크기 (외접 사각형 짧은 변) |
+| Denoise | off / auto / avg2 / avg4 | 검출 영상 잡음 제거. auto = 잡음·점 크기에 맞춘 블러, avgN = 최근 N 프레임 평균 (정지 표적) |
 | Dot min px | 3 / 4 / 6 / 8 / 12 | 점 지름 최소 (원본 픽셀) |
 | Dot group gap | 2.5x / 3.5x / 5x | 같은 마커로 묶는 점 중심 간 거리 (지름 배수) |
 | Dot min count | 1 / 2 | 2 = 1점 마커 무시 |

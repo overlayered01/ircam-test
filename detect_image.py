@@ -32,6 +32,7 @@ def main() -> int:
     ap.add_argument("--dot-min", type=int, default=4, help="점 지름 최소 (픽셀)")
     ap.add_argument("--dot-gap", type=float, default=3.5, help="같은 마커로 묶는 거리 (점 지름 배수)")
     ap.add_argument("--dot-min-count", type=int, default=1, help="2 = 1점 마커 무시")
+    ap.add_argument("--denoise", default="off", choices=["off", "auto"], help="auto = 잡음·점 크기에 맞춘 블러")
     ap.add_argument("--shape-type", default="all", choices=det.SHAPE_TYPES, help="찾을 도형 종류")
     ap.add_argument("--regular", action="store_true", help="정형(정삼각형·정사각형·정십자·원…)만")
     ap.add_argument("--tol", type=float, default=0.1, help="정형 허용 편차 비율 (기본 0.1 = 10%%)")
@@ -43,7 +44,7 @@ def main() -> int:
     a = ap.parse_args()
 
     files = [Path(f) for pat in a.files for f in (glob.glob(pat) or [pat])]
-    pipe = det.Pipeline(a.backend, a.max_width or 10**9)
+    pipe = det.Pipeline(a.backend, a.max_width or 10**9, denoise=a.denoise)
     bad = 0
     for f in files:
         img = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
