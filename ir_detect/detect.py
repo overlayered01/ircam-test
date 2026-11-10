@@ -6,6 +6,7 @@
 - 도형: Otsu 이진화 → 외곽선 → 다각형 근사. 기본은 밝은 바탕(종이)의 어두운 도형, invert 면 어두운 바탕의 밝은 도형.
   도형마다 '정형 편차'(dev) 를 잰다: 변 길이·대각선·팔 길이가 이상적인 정삼각형/정사각형/정십자/원에서 얼마나 벗어났는지의 최대 비율.
   ShapeOptions.regular_only 면 dev <= tol 인 것만 남긴다 (예: tol 0.1 = 10% 이내).
+- 점 마커: 인쇄한 검정 점 1·2·3개를 지름 배수 거리로 묶어 개수(=ID)와 배치(방향)를 읽는다. DotDetector 참고.
 - 큰 영상(DMK 2448x2048)은 max_width 로 줄여서 검출하고 좌표를 원본 스케일로 돌려준다.
 """
 
@@ -91,9 +92,16 @@ class DetResult:
     rejected: int = 0  # 태그 후보 중 디코딩 실패 (OpenCV) / 필터로 떨어진 것 (pupil)
     shapes_rejected: int = 0  # 도형 후보 중 종류·정형·크기 조건으로 떨어진 것
     tags_pending: int = 0  # TagTracker 에서 아직 confirm 프레임을 못 채운 태그 수
+    dots: list["DotMarker"] = field(default_factory=list)
+    dots_rejected: int = 0  # 점 후보 중 모양·대비 조건으로 떨어진 것 + max_count 초과 그룹의 점
+    dots_pending: int = 0  # 아직 confirm 프레임을 못 채운 마커 수
 
     def summary(self) -> str:
         parts = []
+        if self.dots or self.dots_rejected or self.dots_pending:
+            kinds = ",".join(m.kind for m in self.dots[:8]) + (",…" if len(self.dots) > 8 else "")
+            parts.append(f"dots {len(self.dots)}" + (f" [{kinds}]" if self.dots else "") + (f" (-{self.dots_rejected})" if self.dots_rejected else "")
+                         + (f" (+{self.dots_pending} new)" if self.dots_pending else ""))
         if self.backend:
             ids = ",".join(str(t.id) for t in self.tags[:8]) + (",…" if len(self.tags) > 8 else "")
             parts.append(f"tags {len(self.tags)}" + (f" [{ids}]" if self.tags else "") + (f" (-{self.rejected})" if self.rejected else "")
@@ -449,6 +457,262 @@ def _same_spot(a: ShapeDet, b: ShapeDet) -> bool:
     return d < 0.5 * small
 
 
+# ---------------------------------------------------------------- 점(dot) 마커 ----------------------------------------------------------------
+# 인쇄한 검정 점 1·2·3개를 한 마커로 읽는다. 점 하나는 지름 6 px 이상이면 안정적으로 잡히므로(4~5 px 는 들쭉날쭉, 태그는 한 변 18~22 px)
+# 같은 크기 마커로 태그보다 약 3배 거리까지 간다. 합성 검증: 6·9·12 px 점은 잡음 σ3·흐림 0.8 에서 5/5, 3~5 px 는 0~1/5.
+# 묶기 기준은 절대 거리가 아니라 점 지름의 배수라 거리(스케일)에 따라 자동으로 맞는다. 방향은 점 배치에서 읽는다:
+#   1점: 위치만.  2점: 크기가 다르면(큰 점 → 작은 점) 방향 확정, 같으면 축만(180° 모호).
+#   3점 일직선: 간격이 다르면(1:2) 외톨이 점 → 붙은 두 점 쪽이 방향.  3점 L 자: 꼭짓점(내각이 가장 큰 점)에서 나머지 둘의 중점 쪽.
+DOT_MIN_PX = (3, 4, 6, 8, 12)  # 점 지름 최소 (원본 픽셀). DMK 2448 에서 2 m·4 mm 점 ≈ 6 px → Detect width full 로
+DOT_GAPS = (2.5, 3.5, 5.0)  # 같은 마커로 묶는 중심 간 거리 상한 (점 지름 배수). 마커끼리는 이보다 멀리 둔다
+DOT_MAX_COUNT = 3
+DOT_MIN_COUNTS = (1, 2)  # 1점 마커도 받을지. 멀리서 글자 조각·얼룩이 1점으로 읽히면 2 로
+
+
+@dataclass(frozen=True)
+class DotOptions:
+    min_px: int = 4  # 점 지름 최소 (원본 픽셀)
+    gap: float = 3.5  # 묶기 거리 (지름 배수)
+    min_count: int = 1  # 이보다 적은 점 그룹(1점)은 버린다
+    max_count: int = DOT_MAX_COUNT  # 이보다 많이 뭉친 그룹은 버린다 (글자 등)
+    max_px_frac: float = 0.05  # 점 지름 최대 = 영상 폭 × 이 값 (2448 → 122 px, 640 → 32 px)
+    min_circularity: float = 0.75  # 4πA/P². 원 1.0(흐리고 작으면 0.83~), 정사각형 0.785, 글자 획은 대개 0.3 이하
+    min_solidity: float = 0.88  # 면적 / 볼록 껍질 면적. 찬 점 ≈ 1, 글자(B·A)·고리(O) 는 0.5~0.7
+    min_contrast: float = 20.0  # 점 안쪽과 바로 바깥 띠의 밝기 차 최소
+    size_ratio: float = 2.4  # 한 마커 안 점 지름 비 상한 (큰 점+작은 점 2점 마커는 1.5~2 배)
+
+
+@dataclass
+class Dot:
+    center: tuple[float, float]  # 밝기 가중 중심 (원본 픽셀, 서브픽셀)
+    diameter: float  # 면적 등가 지름 (원본 픽셀)
+    area: float
+    circularity: float
+    contrast: float
+
+
+@dataclass
+class DotMarker:
+    dots: list[Dot]
+    kind: str = ""  # 1 / 2 / 2s(크기 다른 두 점) / 3I(일직선) / 3L
+    angle: float | None = None  # 방향 (도, 영상 x 축 기준, y 아래쪽이 +). None = 1점
+    sure: bool = True  # False = 축만 알고 앞뒤는 모름 (같은 크기 2점, 등간격 3점, 정삼각형)
+
+    @property
+    def count(self) -> int:
+        return len(self.dots)
+
+    @property
+    def id(self) -> int:
+        """TagTracker 와 호환: 점 개수가 ID."""
+        return self.count
+
+    @property
+    def center(self) -> tuple[float, float]:
+        xs = [d.center[0] for d in self.dots]
+        ys = [d.center[1] for d in self.dots]
+        return float(np.mean(xs)), float(np.mean(ys))
+
+    @property
+    def diameter(self) -> float:
+        return float(np.mean([d.diameter for d in self.dots]))
+
+    @property
+    def size_px(self) -> float:
+        """마커가 차지하는 폭(점 중심 간 최대 거리 + 지름). 추적 '같은 자리' 기준으로 쓰므로 최소 지름의 3배."""
+        pts = np.array([d.center for d in self.dots])
+        span = max((float(np.linalg.norm(a - b)) for a in pts for b in pts), default=0.0) + self.diameter
+        return max(span, 3 * self.diameter)
+
+
+def _angle_deg(v: np.ndarray) -> float:
+    return float(np.degrees(np.arctan2(v[1], v[0])))
+
+
+def classify_dots(dots: list[Dot]) -> DotMarker:
+    """점 1~3개 → 종류·방향."""
+    m = DotMarker(dots)
+    pts = np.array([d.center for d in dots], float)
+    if len(dots) == 1:
+        m.kind = "1"
+        return m
+    if len(dots) == 2:
+        big, small = sorted(dots, key=lambda d: -d.diameter)
+        if big.diameter >= 1.35 * small.diameter:
+            m.kind, m.sure = "2s", True
+            m.angle = _angle_deg(np.array(small.center) - np.array(big.center))
+        else:
+            m.kind, m.sure = "2", False
+            m.angle = _angle_deg(pts[1] - pts[0]) % 180.0
+        return m
+    # 3점: 가장 먼 두 점 P,Q 와 가운데 점 M
+    d = {(i, j): float(np.linalg.norm(pts[i] - pts[j])) for i in range(3) for j in range(i + 1, 3)}
+    (p, q), pq = max(d.items(), key=lambda kv: kv[1])
+    mid = 3 - p - q
+    pm, mq = d[tuple(sorted((p, mid)))], d[tuple(sorted((mid, q)))]
+    u, v = pts[q] - pts[p], pts[mid] - pts[p]
+    off = abs(float(u[0] * v[1] - u[1] * v[0])) / max(pq, 1e-6)  # M 의 직선 PQ 이탈 (2D 외적 / |PQ|)
+    if off < 0.15 * pq:
+        m.kind = "3I"
+        near, far = (p, q) if pm < mq else (q, p)  # near = 가운데 점에 가까운 끝
+        if min(pm, mq) / max(pm, mq) > 0.8:
+            m.sure, m.angle = False, _angle_deg(pts[q] - pts[p]) % 180.0
+        else:
+            m.sure, m.angle = True, _angle_deg(pts[near] - pts[far])  # 외톨이 끝 → 붙은 두 점 쪽
+        return m
+    m.kind = "3L"
+    angs = []
+    for i in range(3):
+        a, b = pts[(i + 1) % 3] - pts[i], pts[(i + 2) % 3] - pts[i]
+        cosv = np.dot(a, b) / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-6)
+        angs.append(float(np.degrees(np.arccos(np.clip(cosv, -1, 1)))))
+    order = np.argsort(angs)[::-1]
+    corner = int(order[0])
+    m.sure = angs[order[0]] - angs[order[1]] > 10.0
+    others = (pts[(corner + 1) % 3] + pts[(corner + 2) % 3]) / 2
+    m.angle = _angle_deg(others - pts[corner])
+    return m
+
+
+def group_dots(dots: list[Dot], gap: float, size_ratio: float) -> list[list[Dot]]:
+    """중심 간 거리 ≤ gap × 평균 지름이고 지름 비가 size_ratio 이내인 점끼리 이어 붙인다 (단일 연결)."""
+    n = len(dots)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = dots[i], dots[j]
+            if max(a.diameter, b.diameter) > size_ratio * min(a.diameter, b.diameter):
+                continue
+            dist = float(np.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]))
+            if dist <= gap * 0.5 * (a.diameter + b.diameter):
+                parent[find(i)] = find(j)
+    groups: dict[int, list[Dot]] = {}
+    for i, d in enumerate(dots):
+        groups.setdefault(find(i), []).append(d)
+    return list(groups.values())
+
+
+class DotDetector:
+    """인쇄한 검정 점(invert 면 밝은 점)을 찾아 1·2·3점 마커로 묶는다.
+
+    국소(adaptive) 이진화 → 연결 성분 → 크기·종횡비·채움비·원형도·대비로 점만 남김 → 밝기 가중 서브픽셀 중심 →
+    지름 배수 거리로 묶기 → 개수별 분류. 글자·선·큰 어두운 영역은 원형도/크기에서, 우연히 붙은 잡음은 지름 비·개수에서 떨어진다.
+    """
+
+    def __init__(self, options: DotOptions = DotOptions()):
+        self.options = options
+
+    def detect(self, gray: np.ndarray, invert: bool = False, scale: float = 1.0,
+               options: DotOptions | None = None) -> tuple[list[DotMarker], int]:
+        """(마커 목록, 떨어진 후보 수: 점 조건 탈락 + max_count 초과 그룹의 점)."""
+        o = options or self.options
+        dots, rejected = self._find_dots(gray, invert, scale, o)
+        markers: list[DotMarker] = []
+        for g in group_dots(dots, o.gap, o.size_ratio):
+            if len(g) > o.max_count or len(g) < o.min_count:
+                rejected += len(g)
+                continue
+            markers.append(classify_dots(g))
+        markers.sort(key=lambda m: (-m.count, m.center))
+        return markers, rejected
+
+    @staticmethod
+    def _find_dots(gray: np.ndarray, invert: bool, scale: float, o: DotOptions) -> tuple[list[Dot], int]:
+        """2단계: ① 국소 평균보다 10 어두운 곳을 거칠게 떼어 후보 덩어리를 찾고, ② 덩어리마다 (핵심 밝기 + 바깥 밝기)/2 로
+        다시 이진화한다. 흐려서 붙은 두 점은 사이 골이 중간 밝기보다 밝아 ②에서 갈라지고, 면적·지름도 ①보다 정확하다.
+        DMK 2448x2048 전체에서 후보 2000개짜리 지저분한 장면도 40 ms 안쪽이 되도록 후보마다 하는 일을 줄였다."""
+        h, w = gray.shape[:2]
+        min_d = o.min_px / scale  # 검출 영상 픽셀
+        max_d = max(min_d * 2, w * o.max_px_frac)
+        block = int(max(11, (int(max_d * 4) // 2) * 2 + 1))  # 점보다 충분히 큰 창: 점 주변 평균이 종이 밝기가 되게
+        mode = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
+        src = cv2.GaussianBlur(gray, (3, 3), 0) if min_d >= 5 else gray
+        bw = cv2.adaptiveThreshold(src, 255, cv2.ADAPTIVE_THRESH_MEAN_C, mode, block, -10 if invert else 10)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+        min_area = np.pi * (min_d / 2) ** 2 * 0.5
+        max_area = np.pi * (max_d / 2) ** 2 * 1.3
+        g = gray.astype(np.float32)
+        k3 = np.ones((3, 3), np.uint8)
+        out: list[Dot] = []
+        rejected = 0
+        if n <= 1:
+            return out, rejected
+        # 1단계 거르기 (벡터): 면적, 변 길이, 종횡비 ≤ 1+gap (붙은 두세 점은 길쭉하다), 채움비 ≥ 0.3.
+        # 점 하나보다 큰 덩어리는 길쭉할 때(붙은 점들)만 받는다 — 큰 어두운 영역에 2단계를 돌리면 느리다
+        st = stats[1:]
+        bw_, bh, area = st[:, 2].astype(np.float64), st[:, 3].astype(np.float64), st[:, 4].astype(np.float64)
+        long_, short = np.maximum(bw_, bh), np.minimum(bw_, bh)
+        aspect0 = long_ / short
+        ok = ((area >= min_area) & (area <= max_area * 3) & (short >= min_d * 0.7) & (long_ <= max_d * (1 + o.gap))
+              & (aspect0 <= 1 + o.gap) & (area / (bw_ * bh) >= 0.3) & ((long_ <= max_d * 1.2) | (aspect0 >= 1.3)))
+        for i in np.nonzero(ok)[0] + 1:
+            x, y, cw, ch = (int(v) for v in stats[i, :4])
+            pad = 2
+            x0, y0, x1, y1 = max(0, x - pad), max(0, y - pad), min(w, x + cw + pad), min(h, y + ch + pad)
+            mask = (labels[y0:y1, x0:x1] == i).astype(np.uint8)
+            roi = g[y0:y1, x0:x1]
+            grown = cv2.dilate(mask, k3)
+            ring = (cv2.dilate(grown, k3) > 0) & (mask == 0)
+            vals = roi[mask > 0]
+            mean = float(vals.sum()) / vals.size
+            half = vals[vals >= mean] if invert else vals[vals <= mean]  # 안쪽 진한 쪽 절반 (가장자리 반쯤 어두운 픽셀 제외)
+            core = float(half.sum()) / half.size if half.size else mean
+            rv = roi[ring]
+            outside = float(rv.sum()) / rv.size if rv.size else core
+            contrast = (core - outside) if invert else (outside - core)
+            if contrast < o.min_contrast:
+                rejected += 1
+                continue
+            mid = 0.5 * (core + outside)
+            sub = (((roi >= mid) if invert else (roi <= mid)) & (grown > 0)).astype(np.uint8)
+            n2, lab2, st2, _ = cv2.connectedComponentsWithStats(sub, connectivity=8)
+            wgt_all = np.clip((roi - outside) if invert else (outside - roi), 0, None)
+            for j in range(1, n2):
+                sx, sy, sw, sh, sa = (int(v) for v in st2[j])
+                # 중간 밝기로 자르면 가장자리가 빠져 1단계보다 작다. 지름 4~5 px 점은 중심이 픽셀 경계에 걸리면 2x2 만 남으므로 면적 기준은 느슨하게
+                if sa < min_area * 0.6 or sa > max_area or min(sw, sh) < min_d * 0.5 or max(sw, sh) > max_d:
+                    continue
+                aspect = sw / sh if sw > sh else sh / sw
+                fill = sa / float(sw * sh)  # 원 0.785. 축에 나란한 사각형은 ~1 이라 큰 덩어리는 0.9 에서 자른다
+                # 지름 6~9 px 원은 양자화 때문에 채움비가 0.9 를 넘기도 한다 → 80 px 이상 큰 덩어리에서만 0.9 로 사각형을 자른다
+                if aspect > 1.6 or fill < 0.55 or fill > (1.0 if sa < 12 else 0.97 if sa < 80 else 0.9):
+                    rejected += 1
+                    continue
+                m2 = (lab2 == j).astype(np.uint8)
+                contours, _ = cv2.findContours(m2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not contours:
+                    continue
+                cnt = max(contours, key=len)
+                per = cv2.arcLength(cnt, True)
+                circ = 4 * np.pi * sa / (per * per) if per > 0 else 0.0
+                if sa < 12:  # 아주 작은 점은 둘레가 거칠어 원형도가 낮게 나온다
+                    circ = max(circ, fill / 0.785)
+                hull_area = cv2.contourArea(cv2.convexHull(cnt))
+                solidity = sa / hull_area if hull_area > 0 else 1.0
+                if circ < o.min_circularity or solidity < o.min_solidity:
+                    rejected += 1
+                    continue
+                # 밝기 가중 중심 (서브픽셀) + 유효 면적 (가장자리 반쯤 어두운 픽셀은 반만 센다)
+                wgt = np.where(cv2.dilate(m2, k3) > 0, wgt_all, 0.0).astype(np.float32)
+                mom = cv2.moments(wgt, binaryImage=False)
+                if mom["m00"] <= 0:
+                    continue
+                cx, cy = x0 + mom["m10"] / mom["m00"], y0 + mom["m01"] / mom["m00"]
+                eff_area = mom["m00"] / max(contrast, 1.0)
+                diam = 2 * np.sqrt(eff_area / np.pi)
+                if diam < min_d * 0.85:
+                    continue
+                out.append(Dot(((cx + 0.5) * scale, (cy + 0.5) * scale), diam * scale, eff_area * scale * scale, float(circ), float(contrast)))
+        return out, rejected
+
+
 class ShapeTracker:
     """연속 프레임의 도형을 자리(이름 + 중심 거리 < 짧은 변의 절반)로 이어 붙여 검출률을 센다.
 
@@ -514,7 +778,7 @@ class TagTracker:
 
     16h5 처럼 코드가 적은 계열은 배경 무늬가 한 프레임짜리 가짜 ID 로 읽히는 일이 있다. 진짜 태그는 매 프레임 같은 자리에
     같은 ID 로 나오므로 두세 프레임만 이어서 보면 가짜가 걸러진다. 한 프레임 놓친 것은 봐주고(streak 유지), 두 프레임 연속
-    안 보이면 트랙을 지운다. 같은 자리 = 중심 거리가 태그 한 변 이하.
+    안 보이면 트랙을 지운다. 같은 자리 = 중심 거리가 태그 한 변 이하. id·center·size_px 만 쓰므로 DotMarker(id = 점 개수)에도 쓴다.
     """
 
     @dataclass
@@ -575,16 +839,27 @@ class Pipeline:
         self.tag_hamming, self.tag_margin, self.tag_confirm = tag_hamming, tag_margin, tag_confirm
         self._tag: AprilTagDetector | None = None
         self._shape = ShapeDetector()
+        self._dot = DotDetector()
         self.tracker = ShapeTracker() if track else None
         self.tag_tracker = TagTracker() if track else None
+        self.dot_tracker = TagTracker() if track else None  # 점 마커도 같은 방식(개수 = ID)으로 confirm
 
     def run(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
-            shape_options: ShapeOptions | None = None) -> DetResult:
+            shape_options: ShapeOptions | None = None, dots: bool = False, dot_options: DotOptions | None = None) -> DetResult:
         t0 = time.perf_counter()
         res = DetResult()
-        if not (tags or shapes):
+        if not (tags or shapes or dots):
+            for tr in (self.tracker, self.tag_tracker, self.dot_tracker):
+                if tr is not None:
+                    tr.reset()
             return res
         small, scale = prepare(gray, self.max_width, self.upscale)
+        if dots:
+            res.dots, res.dots_rejected = self._dot.detect(small, invert, scale, dot_options)
+            if self.dot_tracker is not None:
+                res.dots, res.dots_pending = self.dot_tracker.update(res.dots, self.tag_confirm)  # type: ignore[arg-type]
+        elif self.dot_tracker is not None:
+            self.dot_tracker.reset()
         if tags:
             if (self._tag is None or self._tag.family != family or self._tag.decimate != self.tag_decimate
                     or self._tag.sharpen != self.tag_sharpen):
@@ -631,10 +906,11 @@ class DetectWorker:
         return self._busy
 
     def submit(self, gray: np.ndarray, tags: bool, shapes: bool, family: str = "tag36h11", invert: bool = False,
-               shape_options: ShapeOptions | None = None, max_width: int = 1280, **params) -> bool:
+               shape_options: ShapeOptions | None = None, max_width: int = 1280, dots: bool = False,
+               dot_options: DotOptions | None = None, **params) -> bool:
         """검출을 요청한다. 스레드가 바쁘면 False 를 돌려주고 이 프레임은 건너뛴다.
         params 는 Pipeline 속성(tag_decimate, tag_sharpen, upscale, tag_hamming, tag_margin, tag_confirm)."""
-        job = (gray, tags, shapes, family, invert, shape_options, max_width, params)
+        job = (gray, tags, shapes, family, invert, shape_options, max_width, dots, dot_options, params)
         if self._thread is None:
             self._run(*job)
             return True
@@ -646,11 +922,11 @@ class DetectWorker:
             self._cv.notify()
         return True
 
-    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, params) -> None:
+    def _run(self, gray, tags, shapes, family, invert, shape_options, max_width, dots, dot_options, params) -> None:
         self.pipeline.max_width = max_width or 10**9
         for k, v in params.items():
             setattr(self.pipeline, k, v)
-        self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options)
+        self.result = self.pipeline.run(gray, tags, shapes, family, invert, shape_options, dots, dot_options)
 
     def _loop(self) -> None:
         while True:
@@ -691,6 +967,27 @@ def draw(img: np.ndarray, res: DetResult, s: float = 1.0, thickness: int = 2) ->
         cx, cy = t.center
         label = f"{t.id}" + (f" m{t.margin:.0f}" if t.margin is not None else "")
         cv2.putText(img, label, (int(cx * s) - 10, int(cy * s) + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    for m in res.dots:
+        color = (255, 0, 255) if m.sure else (200, 120, 255)  # 자홍 = 방향 확정, 연보라 = 축만 (앞뒤 모름)
+        r = max(2, int(m.diameter * s / 2))
+        for d in m.dots:
+            cv2.circle(img, (int(round(d.center[0] * s)), int(round(d.center[1] * s))), r + 2, color, max(1, thickness - 1))
+        cx, cy = m.center
+        if m.count >= 3:
+            pts = (np.array([d.center for d in m.dots]) * s).astype(np.float32)
+            hull = cv2.convexHull(pts).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [hull], True, color, 1)
+        if m.angle is not None:
+            L = max(12.0, m.size_px * s)
+            a = np.radians(m.angle)
+            tip = (int(cx * s + L * np.cos(a)), int(cy * s + L * np.sin(a)))
+            if m.sure:
+                cv2.arrowedLine(img, (int(cx * s), int(cy * s)), tip, color, thickness, tipLength=0.3)
+            else:  # 축만: 양쪽으로 가는 선
+                tail = (int(cx * s - L * np.cos(a)), int(cy * s - L * np.sin(a)))
+                cv2.line(img, tail, tip, color, 1)
+        label = f"D{m.kind}" + (f" {m.angle:.0f}" if m.angle is not None and m.sure else "")
+        cv2.putText(img, label, (int(cx * s) + r + 6, int(cy * s) - r - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
     for sh in res.shapes:
         pts = (sh.contour * s).astype(np.int32).reshape(-1, 1, 2)
         color = (255, 160, 0) if sh.regular else (0, 140, 255)  # 정형 = 주황, 비정형 = 노랑빛

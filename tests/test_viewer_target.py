@@ -4,6 +4,7 @@ import pytest
 
 pytest.importorskip("pyorbbecsdk")
 
+from ir_detect import detect as det  # noqa: E402
 from fov_viewer import (  # noqa: E402
     DeviceChoice,
     MenuRow,
@@ -123,6 +124,11 @@ def test_detect_rows_round_trip():
     assert menu(flags=ViewFlags()).row("tconf").value == "off"
     assert menu(flags=ViewFlags(detect_width=-2)).row("dwidth").value == "2x"
     assert detect_flags(m, ViewFlags()) == flags
+    md = menu(flags=ViewFlags(detect="dots", dot_min=6, dot_gap=5.0, dot_min_count=2))
+    assert md.row("detect").value == "dots" and md.row("dmin").value == "6" and md.row("dgap").value == "5x"
+    assert md.row("dcnt").value == "2"
+    f2 = detect_flags(md, ViewFlags())
+    assert f2.dots and not f2.tags and not f2.shapes and f2.dot_options == det.DotOptions(6, 5.0, 2)
     m.sel = [r.key for r in m._rows].index("tdec")
     m.adjust(1)
     assert detect_flags(m, ViewFlags()).tag_decimate == 4.0

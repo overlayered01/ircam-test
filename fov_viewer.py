@@ -120,7 +120,7 @@ class ViewFlags:
     grid: bool = False  # 각도 격자
     align: bool = True  # D2C 정렬
     auto: bool = False  # 화면 중앙 depth 를 거리로
-    detect: str = "off"  # off / apriltag / shapes / both
+    detect: str = "off"  # off / apriltag / shapes / both / dots
     family: str = "tag36h11"
     invert: bool = False  # 검출 전 영상 반전 (흰 테두리 태그, 어두운 바탕의 밝은 도형)
     shape_type: str = "all"  # det.SHAPE_TYPES
@@ -133,11 +133,22 @@ class ViewFlags:
     tag_sharpen: float = 1.0  # det.TAG_SHARPENS: 작은·회색 태그 검출률 (시간 동일)
     tag_hamming: int = 0  # det.TAG_HAMMINGS: 허용 비트 오류. 36h11 은 1 까지 무난
     tag_margin: float = 10.0  # det.TAG_MARGINS: decision_margin 최소. 오검출이 보이면 20~40
-    tag_confirm: int = 1  # det.TAG_CONFIRMS: 같은 ID 가 같은 자리에 연속 n 프레임이어야 인정
+    tag_confirm: int = 1  # det.TAG_CONFIRMS: 같은 ID(점 마커는 개수)가 같은 자리에 연속 n 프레임이어야 인정
+    dot_min: int = 4  # det.DOT_MIN_PX: 점 지름 최소 (원본 픽셀)
+    dot_gap: float = 3.5  # det.DOT_GAPS: 같은 마커로 묶는 거리 (지름 배수)
+    dot_min_count: int = 1  # det.DOT_MIN_COUNTS: 2 면 1점 마커 무시
 
     @property
     def tags(self) -> bool:
         return self.detect in ("apriltag", "both")
+
+    @property
+    def dots(self) -> bool:
+        return self.detect == "dots"
+
+    @property
+    def dot_options(self) -> det.DotOptions:
+        return det.DotOptions(self.dot_min, self.dot_gap, self.dot_min_count)
 
     @property
     def shapes(self) -> bool:
@@ -148,7 +159,7 @@ class ViewFlags:
         return det.ShapeOptions(self.shape_type, self.shape_regular, self.shape_tol, self.shape_min, self.shape_mode)
 
 
-DETECT_OPTS = ["off", "apriltag", "shapes", "both"]
+DETECT_OPTS = ["off", "apriltag", "shapes", "both", "dots"]
 DETECT_WIDTHS = ["640", "1280", "full", "2x"]  # 검출용 축소 폭. 2x = 원본을 2배로 키워서 (작은 태그, 640 급 영상용)
 DETECT_WIDTH_VALUES = (640, 1280, 0, -2)
 TAG_DECIMATES = [f"{v:g}" for v in det.TAG_DECIMATES]
@@ -156,6 +167,9 @@ TAG_SHARPENS = [f"{v:g}" for v in det.TAG_SHARPENS]
 TAG_HAMMINGS = [str(v) for v in det.TAG_HAMMINGS]
 TAG_MARGINS = [str(v) for v in det.TAG_MARGINS]
 TAG_CONFIRMS = ["off" if v == 1 else str(v) for v in det.TAG_CONFIRMS]
+DOT_MINS = [str(v) for v in det.DOT_MIN_PX]
+DOT_GAPS = [f"{v:g}x" for v in det.DOT_GAPS]
+DOT_MIN_COUNTS = [str(v) for v in det.DOT_MIN_COUNTS]
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +257,11 @@ def detect_rows(flags: ViewFlags) -> list[MenuRow]:
         MenuRow("tsharp", "Tag sharpen", TAG_SHARPENS, _nearest(list(det.TAG_SHARPENS), flags.tag_sharpen), g),
         MenuRow("thamm", "Tag max hamming", TAG_HAMMINGS, _nearest(list(det.TAG_HAMMINGS), flags.tag_hamming), g),
         MenuRow("tmarg", "Tag min margin", TAG_MARGINS, _nearest(list(det.TAG_MARGINS), flags.tag_margin), g),
-        MenuRow("tconf", "Tag confirm", TAG_CONFIRMS, _nearest(list(det.TAG_CONFIRMS), flags.tag_confirm), g),
+        MenuRow("tconf", "Confirm frames", TAG_CONFIRMS, _nearest(list(det.TAG_CONFIRMS), flags.tag_confirm), g),
         MenuRow("invert", "Invert image", ["off", "on"], _onoff(flags.invert), g),
+        MenuRow("dmin", "Dot min px", DOT_MINS, _nearest(list(det.DOT_MIN_PX), flags.dot_min), g),
+        MenuRow("dgap", "Dot group gap", DOT_GAPS, _nearest(list(det.DOT_GAPS), flags.dot_gap), g),
+        MenuRow("dcnt", "Dot min count", DOT_MIN_COUNTS, _nearest(list(det.DOT_MIN_COUNTS), flags.dot_min_count), g),
         MenuRow("stype", "Shape type", types, types.index(flags.shape_type) if flags.shape_type in types else 0, g),
         MenuRow("smode", "Shape mode", modes, modes.index(flags.shape_mode) if flags.shape_mode in modes else 0, g),
         MenuRow("sreg", "Regular only", ["off", "on"], _onoff(flags.shape_regular), g),
@@ -265,6 +282,9 @@ def detect_flags(m: MenuState, flags: ViewFlags) -> ViewFlags:
         tag_margin=float(det.TAG_MARGINS[m.get("tmarg")]),
         tag_confirm=det.TAG_CONFIRMS[m.get("tconf")],
         invert=bool(m.get("invert")),
+        dot_min=det.DOT_MIN_PX[m.get("dmin")],
+        dot_gap=det.DOT_GAPS[m.get("dgap")],
+        dot_min_count=det.DOT_MIN_COUNTS[m.get("dcnt")],
         shape_type=m.row("stype").value,
         shape_mode=m.row("smode").value,
         shape_regular=bool(m.get("sreg")),
@@ -878,7 +898,7 @@ class OrbbecView:
 
 
 def detection_meta(res: det.DetResult) -> dict:
-    if not res.backend and not res.shapes:
+    if not res.backend and not res.shapes and not res.dots:
         return {}
     return {
         "detection": {
@@ -888,6 +908,10 @@ def detection_meta(res: det.DetResult) -> dict:
                       "hamming": t.hamming, "margin": None if t.margin is None else round(t.margin, 1),
                       "corners": np.round(t.corners, 1).tolist()} for t in res.tags],
             "shapes": [{"name": s.name, "center": [round(v, 1) for v in s.center], "area_px": round(s.area)} for s in res.shapes],
+            "dots": [{"kind": m.kind, "count": m.count, "center": [round(v, 1) for v in m.center],
+                      "angle": None if m.angle is None else round(m.angle, 1), "sure": m.sure,
+                      "diameter_px": round(m.diameter, 1),
+                      "points": [[round(v, 1) for v in d.center] for d in m.dots]} for m in res.dots],
         }
     }
 
@@ -963,7 +987,8 @@ class TisView:
 def submit_detect(detw: det.DetectWorker, gray: np.ndarray, flags: ViewFlags) -> det.DetResult:
     """검출 스레드에 이 프레임을 넘기고(바쁘면 건너뜀) 지금까지의 마지막 결과를 돌려준다."""
     detw.submit(gray, flags.tags, flags.shapes, flags.family, flags.invert, flags.shape_options,
-                max(flags.detect_width, 0), tag_decimate=flags.tag_decimate, tag_sharpen=flags.tag_sharpen,
+                max(flags.detect_width, 0), dots=flags.dots, dot_options=flags.dot_options,
+                tag_decimate=flags.tag_decimate, tag_sharpen=flags.tag_sharpen,
                 upscale=2.0 if flags.detect_width == -2 else 1.0, tag_hamming=flags.tag_hamming,
                 tag_margin=flags.tag_margin, tag_confirm=flags.tag_confirm)
     return detw.result
@@ -1008,7 +1033,10 @@ def main() -> None:
     ap.add_argument("--tag-margin", type=float, default=10.0, choices=[float(v) for v in det.TAG_MARGINS],
                     help="decision_margin 최소. 오검출이 보이면 20~40")
     ap.add_argument("--tag-confirm", type=int, default=1, choices=det.TAG_CONFIRMS,
-                    help="같은 ID 가 같은 자리에 연속 n 프레임 나와야 인정 (1 = 바로)")
+                    help="같은 ID(점 마커는 개수)가 같은 자리에 연속 n 프레임 나와야 인정 (1 = 바로)")
+    ap.add_argument("--dot-min", type=int, default=4, choices=det.DOT_MIN_PX, help="점 지름 최소 (원본 픽셀)")
+    ap.add_argument("--dot-gap", type=float, default=3.5, choices=det.DOT_GAPS, help="같은 마커로 묶는 거리 (점 지름 배수)")
+    ap.add_argument("--dot-min-count", type=int, default=1, choices=det.DOT_MIN_COUNTS, help="2 = 1점 마커 무시")
     ap.add_argument("--exposure", type=float, help="DMK 노출 고정 (ms). 자동 노출을 끈다")
     ap.add_argument("--gain", type=float, help="DMK 게인 고정 (dB). 자동 게인을 끈다")
     args = ap.parse_args()
@@ -1054,7 +1082,8 @@ def main() -> None:
     distance = args.distance
     flags = ViewFlags(detect=args.detect, family=args.family, invert=args.invert, detect_width=args.detect_width,
                       tag_decimate=args.tag_decimate, tag_sharpen=args.tag_sharpen, tag_hamming=args.tag_hamming,
-                      tag_margin=args.tag_margin, tag_confirm=args.tag_confirm)
+                      tag_margin=args.tag_margin, tag_confirm=args.tag_confirm, dot_min=args.dot_min, dot_gap=args.dot_gap,
+                      dot_min_count=args.dot_min_count)
     fps_t, fps_n, fps = time.time(), 0, 0.0
     toast, toast_until = "", 0.0
 

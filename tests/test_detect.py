@@ -300,3 +300,147 @@ def test_pipeline_tag_confirm_and_margin():
     p.tag_margin = 1000.0  # 어떤 태그도 못 넘는 margin
     r3 = p.run(img, tags=True, shapes=False)
     assert r3.tags == [] and r3.rejected == 1
+
+
+
+# ---------------------------------------------------------------- 점 마커 ----------------------------------------------------------------
+def dots_image(diam: int = 10, paper: int = 220, ink: int = 25, noise: float = 0.0, blur: float = 0.0,
+               rot_deg: float = 0.0) -> tuple[np.ndarray, dict]:
+    """1점 / 같은 크기 2점 / 큰+작은 2점 / 1:2 일직선 3점 / L 자 3점 마커와 잡음(글자 획·큰 사각형·가는 선)을 그린 종이 영상.
+    각 마커의 기대값 (kind, 중심, 방향) 을 함께 돌려준다."""
+    img = np.full((600, 800), paper, np.uint8)
+    r = diam // 2
+    gap = int(diam * 2.5)  # 점 중심 간격 (지름 2.5배 — 기본 묶기 3.5배 안, 마커 간 거리는 10배 이상)
+
+    def rot(pts, c):
+        a = np.radians(rot_deg)
+        R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+        return [(tuple((R @ (np.array(p, float) - c)) + c)) for p in pts]
+
+    def put(pts, radii):
+        for (x, y), rr in zip(pts, radii):
+            cv2.circle(img, (int(round(x)), int(round(y))), rr, ink, -1, cv2.LINE_AA)
+
+    exp = {}
+    c = np.array([120.0, 120.0]);  put(rot([c], c), [r]);  exp["1"] = (c, None)
+    c = np.array([400.0, 120.0]);  pts = rot([c - (gap / 2, 0), c + (gap / 2, 0)], c);  put(pts, [r, r])
+    exp["2"] = (c, rot_deg % 180)
+    c = np.array([650.0, 120.0]);  pts = rot([c - (gap / 2, 0), c + (gap / 2, 0)], c);  put(pts, [int(round(r * 1.7)), r])
+    exp["2s"] = (c, rot_deg % 360)  # 큰 점(왼쪽) → 작은 점(오른쪽) = +x 방향
+    s = diam * 1.5  # 1:2 직선 마커의 짧은 간격: 긴 간격(3 지름)이 기본 묶기 거리(3.5 지름) 안에 들어야 한다
+    c = np.array([150.0, 400.0]);  pts = rot([c - (s * 1.5, 0), c - (s * 0.5, 0), c + (s * 1.5, 0)], c)
+    put(pts, [r, r, r]);  exp["3I"] = (np.mean(pts, axis=0), (rot_deg + 180) % 360)  # 외톨이(오른쪽) → 붙은 둘(왼쪽) = -x
+    c = np.array([450.0, 400.0]);  pts = rot([c, c + (gap, 0), c + (0, gap)], c);  put(pts, [r, r, r])
+    exp["3L"] = (np.mean(pts, axis=0), (45 + rot_deg) % 360)  # 꼭짓점 → 나머지 중점 = 45°
+    # 잡음: 글자 획 비슷한 가는 선, 큰 어두운 사각형, 작은 점 하나짜리 잡음은 1점 마커로 읽히므로 넣지 않는다
+    cv2.line(img, (560, 330), (760, 340), ink, max(1, diam // 4))
+    cv2.rectangle(img, (600, 420), (780, 560), ink, -1)
+    cv2.putText(img, "ABC 123", (30, 570), cv2.FONT_HERSHEY_SIMPLEX, 2.0, ink, 4)  # 속이 보이는 글자: solidity 로 떨어져야 한다
+    if blur > 0:
+        img = cv2.GaussianBlur(img, (0, 0), blur)
+    if noise > 0:
+        img = np.clip(img.astype(np.float32) + np.random.default_rng(0).normal(0, noise, img.shape), 0, 255).astype(np.uint8)
+    return img, exp
+
+
+def _ang_close(a: float, b: float, tol: float = 6.0, period: float = 360.0) -> bool:
+    d = (a - b) % period
+    return min(d, period - d) <= tol
+
+
+@pytest.mark.parametrize("diam", [6, 10, 20])
+def test_dot_markers_count_and_direction(diam):
+    img, exp = dots_image(diam)
+    markers, rejected = det.DotDetector().detect(img)
+    found = {m.kind: m for m in markers}
+    assert sorted(found) == sorted(exp), [(m.kind, m.center) for m in markers]
+    assert len(markers) == 5
+    for kind, (c, ang) in exp.items():
+        m = found[kind]
+        assert np.hypot(m.center[0] - c[0], m.center[1] - c[1]) < 1.5, (kind, m.center, c)
+        drawn = 2 * (diam // 2) + 1  # cv2.circle(r) 은 지름 2r+1
+        assert abs(min(d.diameter for d in m.dots) - drawn) < max(1.5, drawn * 0.12), (kind, [d.diameter for d in m.dots])
+        if ang is None:
+            assert m.angle is None
+        elif kind == "2":
+            assert not m.sure and _ang_close(m.angle, ang, period=180)
+        else:
+            assert m.sure and _ang_close(m.angle, ang), (kind, m.angle, ang)
+
+
+def test_dot_markers_rotated_blurred_noisy():
+    img, exp = dots_image(10, rot_deg=37.0, blur=1.2, noise=4.0)
+    markers, _ = det.DotDetector().detect(img)
+    found = {m.kind: m for m in markers}
+    assert sorted(found) == sorted(exp)
+    for kind in ("2s", "3I", "3L"):
+        assert found[kind].sure and _ang_close(found[kind].angle, exp[kind][1], tol=8.0), (kind, found[kind].angle, exp[kind][1])
+    assert _ang_close(found["2"].angle, exp["2"][1], tol=8.0, period=180)
+
+
+def test_dot_min_px_and_gap_options():
+    img, _ = dots_image(6)
+    assert len(det.DotDetector(det.DotOptions(min_px=4)).detect(img)[0]) == 5
+    assert det.DotDetector(det.DotOptions(min_px=16)).detect(img)[0] == []  # 7~11 px 점은 최소 16 px 에 못 미친다
+    two_plus = det.DotDetector(det.DotOptions(min_px=4, min_count=2)).detect(img)[0]
+    assert sorted(m.kind for m in two_plus) == ["2", "2s", "3I", "3L"]  # 1점 마커 무시
+    # 묶기 거리를 점 간격(2.5배)보다 작게 하면 같은 크기 점들은 낱개로 흩어진다. 남는 것: 1:2 직선의 붙은 두 점(1.5배)과
+    # 큰+작은 점(평균 지름이 커서 2.0배 안에 든다)
+    loose = det.DotDetector(det.DotOptions(gap=2.0)).detect(img)[0]
+    assert sorted(m.kind for m in loose) == ["1"] * 7 + ["2", "2s"]
+
+
+def test_dot_markers_bright_on_dark_need_invert():
+    img, exp = dots_image(10)
+    inv = 255 - img
+    # 반전 영상에서는 글자의 속(B 의 두 구멍)이 어두운 점 마커로 보일 수 있다 — 밝은 점 자리에는 아무것도 없어야 한다
+    wrong = det.DotDetector().detect(inv)[0]
+    assert not any(np.hypot(m.center[0] - c[0], m.center[1] - c[1]) < 5 for m in wrong for c, _ in exp.values())
+    assert sorted(m.kind for m in det.DotDetector().detect(inv, invert=True)[0]) == sorted(exp)
+
+
+def test_dot_markers_in_dark_room_on_small_paper():
+    """어두운 방 + 작은 종이: 전역 Otsu 는 종이/배경 사이에 걸리지만 국소 이진화는 점을 본다."""
+    img = np.full((600, 800), 15, np.uint8)
+    paper, exp = dots_image(8, paper=200, ink=30)
+    img[150:450, 200:600] = cv2.resize(paper, (400, 300), interpolation=cv2.INTER_AREA)
+    markers, _ = det.DotDetector(det.DotOptions(min_px=3)).detect(img)
+    assert sorted(m.kind for m in markers) == sorted(exp)
+
+
+def test_pipeline_dots_scaled_and_confirmed():
+    img, exp = dots_image(24)
+    big = cv2.resize(img, (2400, 1800), interpolation=cv2.INTER_CUBIC)  # 점 72 px → max_width 1280 에서 38 px
+    p = det.Pipeline(backend="opencv", max_width=1280, track=True, tag_confirm=2)
+    res = p.run(big, tags=False, shapes=False, dots=True)
+    assert res.dots == [] and res.dots_pending == 5 and "(+5 new)" in res.summary()
+    res = p.run(big, tags=False, shapes=False, dots=True)
+    assert len(res.dots) == 5 and res.dots_pending == 0 and "dots 5 [" in res.summary()
+    m = {d.kind: d for d in res.dots}["3L"]
+    c = exp["3L"][0] * 3  # 원본 좌표로 돌아와야 한다
+    assert np.hypot(m.center[0] - c[0], m.center[1] - c[1]) < 4 and abs(m.diameter - 72) < 8
+    res = p.run(big, tags=False, shapes=False, dots=False)  # 끄면 트랙 리셋
+    assert res.dots == [] and p.dot_tracker.tracks == []
+
+
+def test_detect_worker_passes_dots():
+    img, exp = dots_image(10)
+    w = det.DetectWorker(det.Pipeline(backend="opencv"), threaded=False)
+    w.submit(img, tags=False, shapes=False, dots=True, dot_options=det.DotOptions(min_px=4), max_width=0)
+    assert sorted(m.kind for m in w.result.dots) == sorted(exp)
+    canvas = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    det.draw(canvas, w.result)  # 그리기가 죽지 않는지
+    assert (canvas != cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)).any()
+
+
+def test_classify_dots_equilateral_and_even_line_are_axis_only():
+    def dot(x, y, d=10.0):
+        return det.Dot((x, y), d, np.pi * d * d / 4, 1.0, 100.0)
+    tri = det.classify_dots([dot(0, 0), dot(100, 0), dot(50, 86.6)])
+    assert tri.kind == "3L" and not tri.sure
+    line = det.classify_dots([dot(0, 0), dot(50, 0), dot(100, 0)])
+    assert line.kind == "3I" and not line.sure and _ang_close(line.angle, 0, period=180)
+    line = det.classify_dots([dot(0, 0), dot(30, 0), dot(100, 0)])
+    assert line.kind == "3I" and line.sure and _ang_close(line.angle, 180)  # 외톨이(100) → 붙은 둘(0,30) 쪽
+    big_small = det.classify_dots([dot(0, 0, 16), dot(0, 40, 10)])
+    assert big_small.kind == "2s" and big_small.sure and _ang_close(big_small.angle, 90)

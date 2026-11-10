@@ -28,6 +28,10 @@ def main() -> int:
     ap.add_argument("--backend", default="auto", choices=["auto", "opencv", "pupil"])
     ap.add_argument("--no-tags", action="store_true")
     ap.add_argument("--shapes", action="store_true", help="도형 검출도 수행")
+    ap.add_argument("--dots", action="store_true", help="점 마커(1·2·3점) 검출도 수행")
+    ap.add_argument("--dot-min", type=int, default=4, help="점 지름 최소 (픽셀)")
+    ap.add_argument("--dot-gap", type=float, default=3.5, help="같은 마커로 묶는 거리 (점 지름 배수)")
+    ap.add_argument("--dot-min-count", type=int, default=1, help="2 = 1점 마커 무시")
     ap.add_argument("--shape-type", default="all", choices=det.SHAPE_TYPES, help="찾을 도형 종류")
     ap.add_argument("--regular", action="store_true", help="정형(정삼각형·정사각형·정십자·원…)만")
     ap.add_argument("--tol", type=float, default=0.1, help="정형 허용 편차 비율 (기본 0.1 = 10%%)")
@@ -51,13 +55,17 @@ def main() -> int:
         if gray.dtype != "uint8":
             gray = to_u8(gray)
         opts = det.ShapeOptions(a.shape_type, a.regular, a.tol, a.min_px, a.shape_mode)
-        res = pipe.run(gray, tags=not a.no_tags, shapes=a.shapes, family=a.family, invert=a.invert, shape_options=opts)
+        res = pipe.run(gray, tags=not a.no_tags, shapes=a.shapes, family=a.family, invert=a.invert, shape_options=opts,
+                       dots=a.dots, dot_options=det.DotOptions(a.dot_min, a.dot_gap, a.dot_min_count))
         print(f"{f.name}: {res.summary()}")
         for t in res.tags:
             print(f"   tag {t.id:4d}  center=({t.center[0]:.0f},{t.center[1]:.0f})  size={t.size_px:.0f}px"
                   + (f"  margin={t.margin:.0f}" if t.margin is not None else ""))
         for s in res.shapes:
             print(f"   {s.name:9s} center=({s.center[0]:.0f},{s.center[1]:.0f})  size={s.size_px:.0f}px  dev={s.dev * 100:.0f}%")
+        for m in res.dots:
+            ang = "" if m.angle is None else f"  angle={m.angle:.0f}" + ("" if m.sure else " (axis only)")
+            print(f"   dots {m.kind:3s}  center=({m.center[0]:.1f},{m.center[1]:.1f})  diam={m.diameter:.1f}px{ang}")
         canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         det.draw(canvas, res, 1.0, thickness=max(2, gray.shape[1] // 800))
         out_dir = a.out or f.parent
@@ -65,7 +73,9 @@ def main() -> int:
         cv2.imwrite(str(out_dir / f"{f.stem}_det.png"), canvas)
         meta = {"file": str(f), "family": a.family, "invert": a.invert, "backend": res.backend, "ms": round(res.ms, 1),
                 "tags": [{"id": t.id, "center": t.center, "size_px": t.size_px, "margin": t.margin} for t in res.tags],
-                "shapes": [{"name": s.name, "center": s.center, "area_px": s.area} for s in res.shapes]}
+                "shapes": [{"name": s.name, "center": s.center, "area_px": s.area} for s in res.shapes],
+                "dots": [{"kind": m.kind, "count": m.count, "center": m.center, "angle": m.angle, "sure": m.sure,
+                          "points": [d.center for d in m.dots]} for m in res.dots]}
         (out_dir / f"{f.stem}_det.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return 1 if bad else 0
 

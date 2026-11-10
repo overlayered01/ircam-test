@@ -157,27 +157,30 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
 - 1024x1024 외의 해상도에서 패시브로 두면 IR 이 아닌 depth 같은 값이 나와 모드 목록에서 뺐다.
 - 같은 1024x1024 에서 액티브 ↔ 패시브를 바로 바꾸면 SDK 가 이전 모드를 유지한다 (프레임 없음 / 전부 0). 소스가 다른 해상도를 잠깐 열었다 닫아 자동으로 풀어 주며, 그만큼 전환이 ~1.3초 더 걸린다.
 
-### 라이브 인식 테스트 (AprilTag · 도형)
+### 라이브 인식 테스트 (AprilTag · 도형 · 점 마커)
 
-뷰어 `e` 메뉴의 **Detect** 를 `apriltag` / `shapes` / `both` 로 두면 IR 패널에 검출 결과가 겹쳐 그려지고
-(초록 = 태그, 빨간 점 = 첫 코너, 주황 = 도형) 패널 글자에 `tags N [id…] shapes … ms` 요약이 나온다. 장치를 바꿔도 설정은 유지된다.
+뷰어 `e` 메뉴의 **Detect** 를 `apriltag` / `shapes` / `both` / `dots` 로 두면 IR 패널에 검출 결과가 겹쳐 그려지고
+(초록 = 태그, 빨간 점 = 첫 코너, 주황 = 도형, 자홍 = 점 마커) 패널 글자에 `tags N [id…] shapes … ms` 요약이 나온다. 장치를 바꿔도 설정은 유지된다.
 
 | 항목 | 값 | 비고 |
 |---|---|---|
-| Detect | off / apriltag / shapes / both | 재시작 없이 즉시 적용 |
+| Detect | off / apriltag / shapes / both / dots | 재시작 없이 즉시 적용. dots = 인쇄한 점 1·2·3개 마커 (아래) |
 | Detect width | 640 / 1280 / full / 2x | 검출용 축소 폭. DMK 2448px 에서 작은 도형·태그를 보려면 full (outline 포함 약 90 ms). 2x 는 원본을 2배로 키워 검출 (셀 2~3 px 짜리 태그용, 시간 4배 — Mega 640x576 급에서) |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | 36h11 권장. 16h5 는 오검출이 많아 hamming 0, margin ≥ 10 으로 거른다 |
 | Tag decimate | 1 / 2 / 4 | 태그 후보 탐색 해상도 1/n. 2 면 4~6배 빠르고(DMK 1280 폭 46 → 11~18 ms) 최소 태그 크기가 2배(36h11 18 → 36 px) |
 | Tag sharpen | 0.25 / 0.5 / 1 | 비트 읽기 전 선명화 (pupil decode_sharpening). 1 이 기본: 18 px 36h11 0/10 → 8/10, 회색 20 px 5/10 → 9/10, 시간 동일 |
 | Tag max hamming | 0 / 1 / 2 | 허용 비트 오류. 흐린 작은 태그는 한 비트가 틀려 hamming 1 로 떨어진다. 36h11·25h9 는 1 까지 안전, 16h5 는 0 |
 | Tag min margin | 10 / 20 / 40 / 80 | decision_margin 최소. 제대로 보이는 태그는 100 이상(sharpen 1), 오검출은 대개 10~40 이라 20~40 이면 대부분 걸러진다 |
-| Tag confirm | off / 2 / 3 / 5 | 같은 ID 가 같은 자리(중심 거리 ≤ 한 변)에 연속 n 프레임 나와야 표시. 한 프레임 놓친 건 봐준다. 요약의 `(+n new)` 가 대기 중인 수 |
+| Confirm frames | off / 2 / 3 / 5 | 같은 ID(점 마커는 개수)가 같은 자리(중심 거리 ≤ 한 변)에 연속 n 프레임 나와야 표시. 한 프레임 놓친 건 봐준다. 요약의 `(+n new)` 가 대기 중인 수 |
 | Invert image | off / on | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형일 때 켠다 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
 | Shape mode | both / filled / outline | filled = 속이 찬 도형, outline = 선으로 그린 도형(펜 선, 두 획 십자). both 는 둘 다 |
 | Regular only | on / off | 정형만: 정삼각형 · 정사각형 · 정십자 · 원 · 정오각형 · 정육각형. rect 는 제외 |
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차. 변 길이·대각선·팔 길이·종횡비가 이상값에서 벗어난 최대 비율 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 외접 사각형 짧은 변 최소 (원본 픽셀) |
+| Dot min px | 3 / 4 / 6 / 8 / 12 | 점 지름 최소 (원본 픽셀). 4 px 아래는 잡음과 구분이 어렵다 |
+| Dot group gap | 2.5x / 3.5x / 5x | 같은 마커로 묶는 점 중심 간 거리 (점 지름 배수). 시트는 3 d 이내로 인쇄되어 있다 |
+| Dot min count | 1 / 2 | 2 면 1점 마커를 무시한다 (멀리서 글자 조각·얼룩이 1점으로 읽힐 때) |
 
 - 작은 태그 (예: 2 m 에서 2 cm): 태그 한 변이 검출 영상에서 36h11 기준 18 px(셀 2.2 px), 회색·흐린 태그면 22 px 은 돼야 한다.
   2 cm 가 몇 px 로 보이는지는 렌즈가 정한다 — DMK(3.45 µm 픽셀) 2 m 에서 8 mm 렌즈 23 px, 12 mm 35 px, 16 mm 46 px, 25 mm 72 px;
@@ -222,8 +225,28 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
     가까이 두거나(DMK 는 픽셀이 4배라 유리) Shape tolerance 를 15% 로 올린다.
 - 인쇄용 시트: `python shape_sheet.py` → `shapes/shapes_filled.png`, `shapes/shapes_outline.png` (A4 300 dpi, 여섯 도형 60 mm, 선 2 mm).
   `--size`, `--stroke` 로 바꾼다. 100% 배율로 레이저 인쇄.
+- **점 마커** (Detect `dots`): 인쇄한 검정 점 1·2·3개를 한 마커로 읽는다. 점 하나는 지름 **6 px 이상**이면 안정적으로 잡히고(합성 검증:
+  6·9·12 px 점 잡음·흐림 아래 5/5, 3~5 px 는 0~1/5) 태그는 한 변 18~22 px 이 필요하므로, 같은 크기 마커로 태그보다 약 3배 먼 거리까지 간다.
+  DMK 2448 전체(full)에서 2 m·4 mm 점이 약 6 px (Detect width 1280 이면 3 px 라 안 된다 — dots 는 full 로).
+  - 검출: 국소 이진화로 어두운 덩어리를 찾고 → 덩어리마다 (안쪽 밝기 + 바깥 밝기)/2 로 다시 잘라 붙은 점을 가른 뒤 → 종횡비·채움비(원 0.785)·
+    원형도(≥ 0.75)·볼록도(≥ 0.88, 글자 B·고리 O 탈락)·대비(≥ 20)로 점만 남기고 → 밝기 가중 중심(서브픽셀) → 중심 간 거리 ≤ gap × 지름이고
+    지름 비 2.4 이내인 점끼리 묶는다. 4개 이상 뭉친 그룹은 버린다. 2448x2048 full 에서 깨끗한 장면 약 22 ms, 아주 지저분한 장면 ~100 ms (검출 스레드가 프레임을 건너뛴다).
+  - 종류와 방향 (라벨 `D…`, 화살표 = 방향 확정, 양쪽 선 = 축만):
+
+    | 라벨 | 배치 | 방향 |
+    |---|---|---|
+    | D1 | 점 하나 | 없음 (위치만) |
+    | D2 | 같은 크기 두 점 | 축만 (앞뒤 모름, 연보라) |
+    | D2s | 큰 점(1.7 d) + 작은 점 | 큰 점 → 작은 점 |
+    | D3I | 일직선, 간격 1 : 2 | 외톨이 점 → 붙은 두 점 쪽 (등간격이면 축만) |
+    | D3L | 직각 L | 꼭짓점(내각 최대) → 나머지 두 점의 중점 (정삼각형이면 축만) |
+
+  - 오검출: 1점 마커가 가장 약하다 (멀리서 글자 조각·얼룩이 점으로 보인다). Confirm frames 2~3 을 켜고, 1점이 필요 없으면 Dot min count 2.
+    글자가 있는 종이는 글자를 점에서 5 d 이상 떨어뜨린다 (가까우면 한 마커로 묶인다). 반전(흰 점)은 Invert image.
+  - 인쇄용 시트: `python dot_sheet.py` → `shapes/dots_4mm.png`, `dots_6mm.png`, `dots_8mm.png` (지름마다 한 장, 다섯 마커, 간격은 지름 배수로
+    묶기 기준에 맞춰 둠, 아래 100 mm 선으로 배율 확인). `--dots 3 5 10` 으로 바꾼다. 2 m 에서 DMK 는 4 mm, Mega(640px) 는 8~10 mm 부터.
 - 검출은 폭 1280px 로 줄인 영상에서 하고 좌표는 원본으로 돌린다 (DMK 2448x2048 도 약 50ms).
-- `s` 스냅샷의 JSON 에 태그 id·중심·한 변 픽셀·코너, 도형 이름·중심·면적이 들어간다.
+- `s` 스냅샷의 JSON 에 태그 id·중심·한 변 픽셀·코너, 도형 이름·중심·면적, 점 마커 종류·개수·중심·방향·점 좌표가 들어간다.
 - 저장된 영상으로 다시 돌리려면:
 
 ```powershell
@@ -265,10 +288,11 @@ list_modes.py   카메라별 IR 모드 목록 / 실측
 gige_discover.py GigE Vision 카메라 탐색 / 임시 IP
 third_party/tisgrabber/  IC Imaging Control 3.x 래퍼 DLL (DMK 용, 출처는 안의 README)
 check_tags.py   april_tags/ 태그 파일 검증
-detect_image.py 저장된 영상에서 태그·도형 검출
+detect_image.py 저장된 영상에서 태그·도형·점 마커 검출 (--dots)
 shape_sheet.py  인쇄용 도형 테스트 시트 생성 → shapes/
+dot_sheet.py    인쇄용 점 마커 시트 생성 (지름마다 한 장) → shapes/dots_*mm.png
 april_tags/     사용할 AprilTag PNG (apriltag-imgs 형식)
-shapes/         인쇄용 도형 시트 (filled / outline, A4 300 dpi)
+shapes/         인쇄용 도형 시트 (filled / outline) · 점 마커 시트, A4 300 dpi
 tests/          단위 테스트 (장치 불필요): .\.venv\Scripts\python -m pytest
 results/        출력 (gitignore)
 ```

@@ -45,20 +45,23 @@ IR 이 기본으로 켜져 있다. 장치·모드·스트림 설정은 전부 `e
 | Angle grid | on / off | 10° 간격, 렌즈 왜곡 반영. 즉시 적용 |
 | D2C align | on / off | color + depth 가 켜져 있을 때만 의미 있음. 4K 에서 느리면 끈다. 즉시 적용 |
 | Auto distance | on / off | 화면 중앙 depth 의 중앙값을 거리로 사용 (depth 켜졌을 때). 즉시 적용 |
-| Detect | off / apriltag / shapes / both | IR 패널에 검출 결과 오버레이 + 요약. 즉시 적용, 장치를 바꿔도 유지 |
+| Detect | off / apriltag / shapes / both / dots | IR 패널에 검출 결과 오버레이 + 요약. 즉시 적용, 장치를 바꿔도 유지. dots = 점 1·2·3개 마커 |
 | Detect width | 640 / 1280 / full / 2x | 검출용 축소 폭. DMK 에서 작은 도형·태그는 full. 2x = 2배 확대 검출 (Mega 급 작은 영상에서 작은 태그) |
 | Tag family | tag36h11 / tag25h9 / tag16h5 / tag36h10 | |
 | Tag decimate | 1 / 2 / 4 | 2 = 태그 검출 4~6배 빠름, 최소 태그 크기 2배. DMK 에서 끊기면 2 |
 | Tag sharpen | 0.25 / 0.5 / 1 | 작은·회색 태그 검출률. 기본 1 |
 | Tag max hamming | 0 / 1 / 2 | 허용 비트 오류. 36h11 은 1 까지, 16h5 는 0 |
 | Tag min margin | 10 / 20 / 40 / 80 | 검출 신뢰도 최소. 오검출이 보이면 20~40 |
-| Tag confirm | off / 2 / 3 / 5 | 같은 ID 가 같은 자리에 연속 n 프레임 나와야 표시 |
+| Confirm frames | off / 2 / 3 / 5 | 같은 ID(점 마커는 개수)가 같은 자리에 연속 n 프레임 나와야 표시 |
 | Invert image | on / off | 흰 테두리(inv) 태그, 어두운 바탕의 밝은 도형 |
 | Shape type | all / triangle / square / cross / circle / rect / pentagon / hexagon | 찾을 도형 종류 |
 | Shape mode | both / filled / outline | 속이 찬 도형 / 선으로 그린 도형(두 획 십자 포함) / 둘 다 |
 | Regular only | on / off | 정삼각형·정사각형·정십자·원·정오각형·정육각형만 (rect 제외) |
 | Shape tolerance | 5 / 10 / 15 / 20 / 30 % | 정형 허용 편차 |
 | Shape min px | 10 / 20 / 40 / 80 / 160 | 도형 최소 크기 (외접 사각형 짧은 변) |
+| Dot min px | 3 / 4 / 6 / 8 / 12 | 점 지름 최소 (원본 픽셀) |
+| Dot group gap | 2.5x / 3.5x / 5x | 같은 마커로 묶는 점 중심 간 거리 (지름 배수) |
+| Dot min count | 1 / 2 | 2 = 1점 마커 무시 |
 
 DMK 33GX264 를 고르면 메뉴 항목이 아래로 바뀐다.
 
@@ -79,7 +82,7 @@ DMK 에서는 메뉴 없이 키로도 바꾼다 (즉시 적용, 자동은 꺼진
 | `,` / `.` | 노출 한 단계 내림 / 올림 |
 | `;` / `'` | 게인 3 dB 내림 / 올림 |
 | Angle grid | on / off | `calib/dmk_<serial>.json` 이 있을 때만 나온다 |
-| Detect / Tag family / Invert image / Shape … | 위와 같음 | |
+| Detect / Tag family / Invert image / Shape … / Dot … | 위와 같음 | |
 
 - 지원하지 않는 조합이면 "failed: ..." 가 표시되고 이전 구성이 유지된다.
 - 장치 전환에 실패하면 이전 장치를 다시 연다.
