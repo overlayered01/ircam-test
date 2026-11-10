@@ -223,7 +223,7 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
   - 뷰어는 도형을 프레임 간 추적한다: 라벨의 `[xx%]` 가 최근 30프레임 중 검출된 비율(검출률), 요약의 `hit xx%` 는 그 평균.
     이번 프레임에 안 잡혀도 직전 10프레임 안에 보였으면 회색으로 유지해 깜빡이지 않는다. 검출률을 올리려면 도형을 키우거나
     가까이 두거나(DMK 는 픽셀이 4배라 유리) Shape tolerance 를 15% 로 올린다.
-- 인쇄용 시트: `python shape_sheet.py` → `shapes/shapes_filled.png`, `shapes/shapes_outline.png` (A4 300 dpi, 여섯 도형 60 mm, 선 2 mm).
+- 인쇄용 시트: `python shape_sheet.py` → `print/shapes_filled.png`, `print/shapes_outline.png` (A4 300 dpi, 여섯 도형 60 mm, 선 2 mm).
   `--size`, `--stroke` 로 바꾼다. 100% 배율로 레이저 인쇄.
 - **점 마커** (Detect `dots`): 인쇄한 검정 점 1·2·3개를 한 마커로 읽는다. 점 하나는 지름 **6 px 이상**이면 안정적으로 잡히고(합성 검증:
   6·9·12 px 점 잡음·흐림 아래 5/5, 3~5 px 는 0~1/5) 태그는 한 변 18~22 px 이 필요하므로, 같은 크기 마커로 태그보다 약 3배 먼 거리까지 간다.
@@ -244,10 +244,10 @@ Femto Bolt (FW 1.0.9) IR 모드: 320x288 / 640x576 (NFOV), 512x512 / 1024x1024 (
   - 오검출: 1점 마커가 가장 약하다 (멀리서 글자 조각·얼룩이 점으로 보인다). Confirm frames 2~3 을 켜고, 1점이 필요 없으면 Dot min count 2.
     글자가 있는 종이는 글자를 점에서 5 d 이상 떨어뜨린다 (가까우면 한 마커로 묶인다). 반전(흰 점)은 Invert image.
   - 인쇄용 시트 (`dot_sheet.py`, A4 300 dpi, 100% 배율, 아래 100 mm 선으로 배율 확인; 글자는 얇은 회색):
-    - `python dot_sheet.py markers [--dots 4 6 8]` → `shapes/dots_markers.png` (_p2 …): 다섯 마커 × 지름.
-    - `python dot_sheet.py sizes [--kinds 3L] [--sizes 2 3 4 5 6 8 10 12] [--grays 0 90 150]` → `shapes/dots_sizes.png` (_p2 …):
+    - `python dot_sheet.py markers [--dots 4 6 8]` → `print/dots_markers.png` (_p2 …): 다섯 마커 × 지름.
+    - `python dot_sheet.py sizes [--kinds 3L] [--sizes 2 3 4 5 6 8 10 12] [--grays 0 90 150]` → `print/dots_sizes.png` (_p2 …):
       한 마커를 크기·잉크 농도별로. 거리별 최소 크기와 회색 잉크 한계를 재는 용도. 합성 2 m 검증: 검정·회색 150 모두 3 mm(4.5 px)까지, 2 mm 는 안 됨.
-    - `python dot_sheet.py cube [--face 80 --dot 4 --picture 38 --edge 2 --faces 1 2 2s 3I 3L 3L,1,3L,1]` → `shapes/cube_faces.png` (_p2)
+    - `python dot_sheet.py cube [--face 80 --dot 4 --picture 38 --edge 2 --faces 1 2 2s 3I 3L 3L,1,3L,1]` → `print/cube_faces.png` (_p2)
       + 면마다 `cube_face_N_<spec>.png` (점만, 정확히 80 mm → 인쇄소용). 8 cm 큐브 면: 네 모서리에 마커(L 꼭짓점·큰 점·외톨이 점이 면
       모서리 쪽), 가운데 그림 자리(점선). spec 이 하나면 네 모서리 같은 마커, `TL,TR,BR,BL` 로 모서리별 지정(`-` 는 비움).
       **그림의 어두운 부분이 점에서 묶기 거리(3.5 d = 14 mm) 안에 오면 점과 한 마커로 묶여 깨진다** — 스크립트가 그림 상자 ↔ 점 최소 거리를
@@ -298,10 +298,10 @@ gige_discover.py GigE Vision 카메라 탐색 / 임시 IP
 third_party/tisgrabber/  IC Imaging Control 3.x 래퍼 DLL (DMK 용, 출처는 안의 README)
 check_tags.py   april_tags/ 태그 파일 검증
 detect_image.py 저장된 영상에서 태그·도형·점 마커 검출 (--dots)
-shape_sheet.py  인쇄용 도형 테스트 시트 생성 → shapes/
-dot_sheet.py    인쇄용 점 마커 시트: markers / sizes / cube(8 cm 큐브 면) → shapes/dots_*.png, cube_face*.png
+shape_sheet.py  인쇄용 도형 테스트 시트 생성 → print/
+dot_sheet.py    인쇄용 점 마커 시트: markers / sizes / cube(8 cm 큐브 면) → print/dots_*.png, cube_face*.png
 april_tags/     사용할 AprilTag PNG (apriltag-imgs 형식)
-shapes/         인쇄용 도형 시트 (filled / outline) · 점 마커 시트 (markers / sizes / cube), A4 300 dpi
+print/          인쇄용 도형 시트 (filled / outline) · 점 마커 시트 (markers / sizes / cube), A4 300 dpi
 tests/          단위 테스트 (장치 불필요): .\.venv\Scripts\python -m pytest
 results/        출력 (gitignore)
 ```

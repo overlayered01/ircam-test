@@ -1,10 +1,10 @@
 """인쇄용 점 마커 시트 (A4, 300 dpi, 레이저 프린터, 100% 배율). 세 가지 시트를 만든다.
 
-    python dot_sheet.py markers                        # 다섯 마커 × 지름 4/6/8 mm → shapes/dots_markers.png
+    python dot_sheet.py markers                        # 다섯 마커 × 지름 4/6/8 mm → print/dots_markers.png
     python dot_sheet.py markers --dots 3 4 5 6 8 10    # 지름을 바꿔서 (안 들어가면 _p2, _p3 …)
-    python dot_sheet.py sizes                          # 한 마커(3L)를 지름 2~12 mm 로 → shapes/dots_sizes.png
+    python dot_sheet.py sizes                          # 한 마커(3L)를 지름 2~12 mm 로 → print/dots_sizes.png
     python dot_sheet.py sizes --kinds 1 3L --sizes 2 3 4 5 6 8 10 --grays 0 90 150   # 종류·크기·회색 농도 조합
-    python dot_sheet.py cube                           # 8 cm 큐브 면 6개 (모서리 마커 + 가운데 그림 자리) → shapes/cube_faces.png + cube_face_*.png
+    python dot_sheet.py cube                           # 8 cm 큐브 면 6개 (모서리 마커 + 가운데 그림 자리) → print/cube_faces.png + cube_face_*.png
     python dot_sheet.py cube --face 80 --dot 4 --picture 38 --edge 2 --faces 1 2 2s 3I 3L 3L,1,3L,1
 
 마커 종류 (간격은 점 지름 d 의 배수. 뷰어 Dot group gap 기본 3.5 d 안에 들어가고, 마커끼리는 6 d 이상 떨어뜨린다):
@@ -247,7 +247,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sheet", nargs="?", default="markers", choices=["markers", "sizes", "cube"])
     ap.add_argument("--dpi", type=int, default=300)
-    ap.add_argument("--out", type=Path, default=Path("shapes"))
+    ap.add_argument("--out", type=Path, default=Path("print"))
     ap.add_argument("--dots", type=float, nargs="+", default=[4.0, 6.0, 8.0], help="markers: 점 지름 mm")
     ap.add_argument("--kinds", nargs="+", default=["3L"], choices=list(MARKERS), help="sizes: 마커 종류")
     ap.add_argument("--sizes", type=float, nargs="+", default=[2, 3, 4, 5, 6, 8, 10, 12], help="sizes: 점 지름 mm")
