@@ -9,6 +9,7 @@
 | `dots/` | `dots_markers.png`(+`_p2`) 다섯 가지 점 마커 × 지름 4/6/8 mm | 점 마커 종류별 인식 확인. `python dot_sheet.py markers` |
 | | `dots_sizes.png`(~`_p4`) L 마커를 지름 2~12 mm × 잉크 농도 0/90/150 으로 | 거리별 최소 점 크기, 회색 잉크 한계 재기. `python dot_sheet.py sizes --grays 0 90 150` |
 | `cube/faces_5/` | **실제 쓸 큐브 5면** (80 mm, 점 4 mm, 그림 자리 38 mm). 모서리 점 개수 조합 1-1-1-1 / 1-1-1-2 / 1-1-2-1 / 1-2-1-1 / 2-1-1-1 | `faces_5.png`, `_p2.png` 는 A4 시험·재단용, `single/face_N_*.png` 는 점만 있는 80 mm 낱장 → 인쇄소에 그대로 |
+| `cube/faces_5_d6/` | 같은 5면을 **점 6 mm** 로 (그림 자리는 24 mm 로 줄임 — 6 mm 점의 묶기 거리 21 mm 를 지키는 최대) | 4 mm 가 모자랄 때 쓸 큰 점 버전. `single/` 낱장 포함 |
 | `cube/test_2m_for_2.7m/` | 위 5면을 **2.7 m 용을 2 m 에서 시험하도록 2/2.7 배로 줄인** 시트. 장마다 실제 점 지름 3 / 4 / 5 / 6 / 8 mm | 점 크기 결정용. 2 m 에서 찍어 어느 장까지 20 마커가 다 잡히는지 본다 (합성 예측: 4 mm 부터) |
 | `cube/faces_kinds/` | 다섯 마커 종류(1, 2, 2s, 3I, 3L)를 각각 네 모서리에 둔 면 + 3L/1 섞은 면 | 모서리 마커 종류 비교용 |
 | `cube/combos12/` | 모서리마다 점 1개/2개인 16가지 조합 전부 | 면 ID 를 더 늘릴 때 |
@@ -19,6 +20,7 @@
 
 ```
 python dot_sheet.py cube --faces 1,1,1,1 1,1,1,2 1,1,2,1 1,2,1,1 2,1,1,1 --stem faces_5
+python dot_sheet.py cube --faces 1,1,1,1 1,1,1,2 1,1,2,1 1,2,1,1 2,1,1,1 --dot 6 --picture 24 --stem faces_5_d6
 python dot_sheet.py cube --faces 1,1,1,1 1,1,1,2 1,1,2,1 1,2,1,1 2,1,1,1 --dot 3 4 5 6 8 --distance 2.7 2 --no-singles --stem test_2m_for_2.7m
 python dot_sheet.py cube --stem faces_kinds
 python dot_sheet.py cube --faces combos12 --stem combos12
