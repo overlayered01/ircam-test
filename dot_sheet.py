@@ -66,10 +66,11 @@ def text(img, s: str, x: int, y: int, scale: float = 0.8) -> None:
 class Pages:
     """A4 페이지 묶음: 제목, 100 mm 배율선, 흘려 넣기(flow) 배치."""
 
-    def __init__(self, dpi: int, title: str):
+    def __init__(self, dpi: int, title: str, landscape: bool = False, margin_mm: float = 10.0):
         self.px = dpi / 25.4
-        self.w, self.h = int(A4_MM[0] * self.px), int(A4_MM[1] * self.px)
-        self.margin = int(10 * self.px)
+        w_mm, h_mm = (A4_MM[1], A4_MM[0]) if landscape else A4_MM
+        self.w, self.h = int(w_mm * self.px), int(h_mm * self.px)
+        self.margin = int(margin_mm * self.px)
         self.top = self.margin + int(8 * self.px)
         self.bottom = self.h - self.margin - int(5 * self.px)  # 아래 100 mm 선 자리
         self.title = title
@@ -195,12 +196,14 @@ def picture_clearance(dots, face: float, picture: float) -> float:
 
 
 def draw_face(img, ox: int, oy: int, spec: str, face: float, margin: float, d: float, picture: float,
-              label: str, guides: bool = True) -> list[tuple[float, float, float]]:
+              label: str, guides: bool = True, outline: bool = True) -> list[tuple[float, float, float]]:
     dots = face_dots(spec, face, margin, d)
     for x, y, r in dots:
         cv2.circle(img, (int(round(ox + x)), int(round(oy + y))), int(round(r)), 0, -1, cv2.LINE_AA)
     if guides:
         f = int(round(face))
+        if outline:  # 오리는 선: 아주 옅은 회색 1 px. 점에서 2 mm 뿐이지만 멀리서는 종이에 묻힌다 (2 m 합성에서 확인)
+            cv2.rectangle(img, (ox, oy), (ox + f, oy + f), 200, 1)
         # 재단 표시: 네 변 중앙의 짧은 눈금 (면 테두리 전체를 그리면 2 mm 옆의 점과 흐려져 붙는다). 자를 맞대고 자른다
         tick = max(8, int(face * 0.06))
         for (ax, ay, bx, by) in ((f // 2, -tick, f // 2, 0), (f // 2, f, f // 2, f + tick), (-tick, f // 2, 0, f // 2), (f, f // 2, f + tick, f // 2)):
@@ -233,7 +236,7 @@ def expand_faces(faces: list[str]) -> list[str]:
 
 def sheet_cube(faces: list[str], face_mm: float, dot_mm: float, picture_mm: float, margin_mm: float | None,
                gap_d: float, dpi: int, out: Path, stem: str = "cube_faces", scale: float = 1.0,
-               singles: bool = True) -> tuple[list[Path], float]:
+               singles: bool = True, outline: bool = True) -> tuple[list[Path], float]:
     """A4 에 면들을 배치해 저장하고, 면마다 점만 그린 낱장 PNG(정확히 face_mm)도 저장한다. (경로들, 그림↔점 최소 거리 mm).
     scale < 1 이면 모든 치수를 그 배로 줄여 그린다 (실제 거리 대신 가까이서 시험할 때: 2.7 m 짜리를 2 m 에서 → 2/2.7).
     라벨과 출력은 실제 치수와 줄인 치수를 같이 적는다. 그림↔점 거리 검사는 실제 치수 기준(비율은 같다)."""
@@ -242,15 +245,17 @@ def sheet_cube(faces: list[str], face_mm: float, dot_mm: float, picture_mm: floa
     face, d, picture = face_mm * k, dot_mm * k, picture_mm * k
     margin = (margin_mm if margin_mm is not None else 2.0) * k  # 면 가장자리 ↔ 점 가장자리
     sc = f"  x{scale:.3g} (face {face_mm * scale:.1f} mm, dot {dot_mm * scale:.2f} mm)" if scale != 1.0 else ""
-    pg = Pages(dpi, f"Cube faces  {face_mm:g} mm  dot {dot_mm:g} mm  picture {picture_mm:g} mm{sc}  @ {dpi} dpi  (print at 100%)")
+    # 가로 A4, 여백 8 mm: 80 mm 면이 3 × 2 = 6개 들어간다 (세로는 2 × 3 이 안 돼 2 장이 된다)
+    pg = Pages(dpi, f"Cube faces  {face_mm:g} mm  dot {dot_mm:g} mm  picture {picture_mm:g} mm{sc}  @ {dpi} dpi  (print at 100%)",
+               landscape=True, margin_mm=8.0)
     worst = float("inf")
     paths = []
     for i, spec in enumerate(faces):
-        # 면 사이는 6 d 이상 (이웃 면 모서리 마커끼리 묶이지 않게: 8 mm 로 붙이면 12 mm = 3 d 라 한 덩어리가 된다) → 보통 한 장에 4면
-        gap = max(8 * px, 6 * d + 2 * margin)
+        # 면 사이: 이웃 면 모서리 점 중심이 4 d 이상 떨어지게 (묶기 거리 3.5 d 보다 멀리). 6 mm 점이면 20 mm
+        gap = max(8 * px, 4 * d - 2 * margin)
         x, y = pg.place(face, face, gap, gap)
         label = f"face {i + 1}: {spec}" + (f"  d{dot_mm:g}" if scale != 1.0 else "")
-        dots = draw_face(pg.img, int(x), int(y), spec, face, margin, d, picture, label)
+        dots = draw_face(pg.img, int(x), int(y), spec, face, margin, d, picture, label, outline=outline)
         clear = picture_clearance(dots, face, picture) / k
         worst = min(worst, clear)
         if singles:
@@ -283,6 +288,7 @@ def main() -> None:
     ap.add_argument("--distance", type=float, nargs=2, metavar=("REAL_M", "TEST_M"), default=None,
                     help="cube: 실제 거리와 시험 거리 (m). 치수를 TEST/REAL 배로 줄여 가까이서 실제 거리처럼 보이게 (예 2.7 2)")
     ap.add_argument("--no-singles", action="store_true", help="cube: 낱장 PNG 는 만들지 않음 (시험 시트만)")
+    ap.add_argument("--no-outline", action="store_true", help="cube: 면 테두리(오리는 선)를 그리지 않음 (변 중앙 눈금만)")
     ap.add_argument("--picture", type=float, default=38.0, help="cube: 가운데 그림 상자 한 변 mm")
     ap.add_argument("--edge", type=float, default=2.0, help="cube: 면 가장자리 ↔ 점 가장자리 mm")
     ap.add_argument("--gap", type=float, default=3.5, help="cube: 뷰어 Dot group gap (지름 배수) — 그림 간격 검사용")
@@ -299,7 +305,8 @@ def main() -> None:
         scale = a.distance[1] / a.distance[0] if a.distance else 1.0
         for dot in a.dot:
             stem = a.stem + (f"_d{dot:g}" if len(a.dot) > 1 else "")
-            sheet_cube(expand_faces(a.faces), a.face, dot, a.picture, a.edge, a.gap, a.dpi, a.out, stem, scale, not a.no_singles)
+            sheet_cube(expand_faces(a.faces), a.face, dot, a.picture, a.edge, a.gap, a.dpi, a.out, stem, scale, not a.no_singles,
+                       not a.no_outline)
 
 
 if __name__ == "__main__":
